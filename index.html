@@ -576,6 +576,10 @@
   .net-mem .dot{width:.55rem;height:.55rem;border-radius:50%;background:#6fcf8e;flex:none;}
   .net-mem.off .dot{background:var(--ink-dim);}
   #netNote:empty{display:none;}
+  /* 参加を選んでいる間は、ホストが決める設定を薄くして触れなくする */
+  #setupModal.joining .setup-cols > div:first-child,
+  #setupModal.joining #optCount,
+  #setupModal.joining #optSlots .slot:not(:first-child){opacity:.28;pointer-events:none;}
   #netToast{
     position:fixed;left:50%;top:calc(var(--barTop) + .2rem);transform:translate(-50%,-.4rem);z-index:30;
     max-width:min(34rem,calc(100vw - 2rem));padding:.5rem .9rem;border-radius:.45rem;
@@ -11339,6 +11343,7 @@ $('startGame').onclick = () => {
   saveCfg();
   applySpeed();
   if(NET.on){ netHostStart(); return; }   // ネット対戦：全員の端末で同時に始める
+  if(NET.role === 'join'){ netOpenEntry('', 'join'); return; }             // 参加：部屋に入る画面へ
   if(netSoloHumans()){ netOpenEntry(NET_PLAYER_MSG, 'create'); return; }   // Player の席はネット対戦でだけ使える
   $('setupModal').classList.remove('show');
   start();
@@ -11742,8 +11747,36 @@ function netSetName(v){
 const renderSetupModalSolo = renderSetupModal;
 renderSetupModal = function(){
   renderSetupModalSolo();
+  netRoleRow();
   if(NET.on) netDecorateSetup(); else netDecorateSolo();
 };
+/* 「あなた」の行の ホスト／参加。参加を選ぶと、ほかの設定はホストが決めるので触れなくし、
+   「島に渡る」で部屋に入る画面を開く。部屋の中（ネット対戦中）ではホストに固定して触れない */
+function netRoleRow(){
+  const row = $('optSlots').children[0];
+  if(!row) return;
+  const join = !NET.on && NET.role === 'join';
+  const wrap = document.createElement('div');
+  wrap.className = 'slot-pick';
+  const seg = document.createElement('div');
+  seg.className = 'seg';
+  [['host', 'ホスト'], ['join', '参加']].forEach(([v, label]) => {
+    const b = document.createElement('button');
+    b.textContent = label;
+    if((join ? 'join' : 'host') === v) b.classList.add('on');
+    b.disabled = NET.on;
+    b.onclick = () => { NET.role = v; renderSetupModal(); };
+    seg.appendChild(b);
+  });
+  wrap.appendChild(seg);
+  // ほかの行の段位の欄と同じ幅を空けて、ボタンの並びをそろえる
+  const pad = document.createElement('span');
+  pad.className = 'lvsel';
+  pad.style.visibility = 'hidden';
+  wrap.appendChild(pad);
+  row.appendChild(wrap);
+  $('setupModal').classList.toggle('joining', join);
+}
 /* 1台の端末を回して遊ぶ方式（ホットシート）はやめた（2026-09-22）。
    相手の席を Player にするのは、別の端末の人とネット対戦するとき。
    「島に渡る」を押したら、渡る前に部屋を作る画面（合言葉の入力）を出す */
@@ -12233,6 +12266,8 @@ function netLobbySeated(token){
 /* --- 部屋を作る・入る（インターネット） --- */
 function netOpenEntry(msg, mode){
   NET.entry = true;
+  // 名前をまだ決めていなければ、開始画面の「あなた」の名前を使う
+  if(!NET.name && CFG.slots[0] && CFG.slots[0].name && CFG.slots[0].name !== DEFAULTS.slots[0].name) netSetName(CFG.slots[0].name);
   NET.entryMode = mode || '';            // create＝部屋を作るだけ（Player の席を選んで始めようとした）
   NET.entryMsg = msg || '';
   netRenderModal();
@@ -12252,7 +12287,7 @@ function netRenderEntry(){
   const key = room + '|' + (NET.entryMode || '');
   if(box.dataset.key !== key || !box.innerHTML){
     box.dataset.key = key;
-    box.innerHTML = room ? join : NET.entryMode === 'create' ? make : make + join;
+    box.innerHTML = room || NET.entryMode === 'join' ? join : NET.entryMode === 'create' ? make : make + join;
     if($('netEnter')) $('netEnter').onclick = () => {
       const r = $('netRoomIn').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
       const p = $('netPassIn').value.trim();
@@ -12308,6 +12343,7 @@ function netRenderModal(){
     $('netStatus').textContent = NET.entryRoom
       ? `部屋 ${NET.entryRoom} に入ります。ホストから聞いた合言葉を入れてください。`
       : NET.entryMode === 'create' ? '島に渡る前に、ネット対戦の部屋を作ります。'
+      : NET.entryMode === 'join' ? 'ホストから聞いた部屋番号と合言葉を入れてください。'
       : 'インターネットで遊びます。ホストが部屋を作り、URLと合言葉をほかの人に伝えます。';
     netRenderEntry();
     netNote(NET.entryMsg || '', !!NET.entryMsg && NET.entryMode !== 'create');   // 部屋を作る案内は警告の色にしない
@@ -12361,6 +12397,7 @@ function netEnter(){
   setInterval(netPump, 25);
 }
 function netInit(){
+  renderSetupModal();   // 読み込みの最初の描画はこの仕組みより前なので、ホスト／参加の行を付けて描き直す
   try{
     NET.name = localStorage.getItem('island_net_name') || '';
     NET.token = sessionStorage.getItem('island_net_token') || '';
