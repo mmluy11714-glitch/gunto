@@ -576,6 +576,14 @@
   .net-mem .dot{width:.55rem;height:.55rem;border-radius:50%;background:#6fcf8e;flex:none;}
   .net-mem.off .dot{background:var(--ink-dim);}
   #netNote:empty{display:none;}
+  #netToast{
+    position:fixed;left:50%;top:calc(var(--barTop) + .2rem);transform:translate(-50%,-.4rem);z-index:30;
+    max-width:min(34rem,calc(100vw - 2rem));padding:.5rem .9rem;border-radius:.45rem;
+    background:var(--panel-solid);border:1px solid var(--gold);color:var(--ink);
+    font-size:clamp(.78rem,1.6vw,.9rem);line-height:1.5;text-align:center;
+    opacity:0;pointer-events:none;transition:opacity .25s, transform .25s;
+  }
+  #netToast.show{opacity:1;transform:translate(-50%,0);}
   .net-sec{border-top:1px solid var(--line);padding-top:.7rem;margin-top:.2rem;margin-bottom:.8rem;}
   .net-sec .picklabel{margin-bottom:.4rem;}
   .net-row{display:flex;gap:.4rem;margin-bottom:.45rem;}
@@ -622,6 +630,7 @@
 <button id="gear" title="設定" aria-label="設定"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.14 12.94a7.07 7.07 0 0 0 0-1.88l2-1.58a.5.5 0 0 0 .12-.61l-1.92-3.32a.5.5 0 0 0-.59-.22l-2.39.96a7.3 7.3 0 0 0-1.62-.94l-.36-2.54A.5.5 0 0 0 13.9 2h-3.8a.5.5 0 0 0-.49.42l-.36 2.54a7.3 7.3 0 0 0-1.62.94l-2.39-.96a.5.5 0 0 0-.59.22L2.73 8.48a.5.5 0 0 0 .12.61l2 1.58a7.07 7.07 0 0 0 0 1.88l-2 1.58a.5.5 0 0 0-.12.61l1.92 3.32a.5.5 0 0 0 .59.22l2.39-.96a7.3 7.3 0 0 0 1.62.94l.36 2.54a.5.5 0 0 0 .49.42h3.8a.5.5 0 0 0 .49-.42l.36-2.54a7.3 7.3 0 0 0 1.62-.94l2.39.96a.5.5 0 0 0 .59-.22l1.92-3.32a.5.5 0 0 0-.12-.61zM12 15.6A3.6 3.6 0 1 1 15.6 12 3.6 3.6 0 0 1 12 15.6z"/></svg></button>
 <!-- ネット対戦のときだけ出す（左上、歯車と対称の位置） -->
 <button id="netBtn" title="ネット対戦" aria-label="ネット対戦"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 11a3 3 0 1 0-3-3 3 3 0 0 0 3 3zm-8 0a3 3 0 1 0-3-3 3 3 0 0 0 3 3zm0 2c-2.3 0-7 1.2-7 3.5V19h14v-2.5C15 14.2 10.3 13 8 13zm8 0c-.3 0-.6 0-1 .1a4.2 4.2 0 0 1 2 3.4V19h6v-2.5c0-2.3-4.7-3.5-7-3.5z"/></svg><i id="netDot"></i></button>
+<div id="netToast" role="status" aria-live="polite"></div>
 <div id="banner"><span id="bannerText"></span></div>
 <div id="devFx"></div>
 <div id="awardFx"></div>
@@ -11673,7 +11682,8 @@ function netPresent(){
     const asking = NET_REGIONS.some(id => id !== 'actions' && document.getElementById(id) &&
                                          document.getElementById(id).classList.contains('show'));
     let html = '';
-    if(NET.pid === null) html = '観戦中';
+    if(!NET.game) html = NET.host ? '' : 'ホストが始めるのを待っています';
+    else if(NET.pid === null) html = '観戦中';
     else if(cur && cur.cpu && !asking) html = `<span class="swatch" style="background:${cur.css}"></span>${cur.name}の番`;
     else if(h) html = `<span class="swatch" style="background:${h.css}"></span>${h.name}` + (asking ? 'が選んでいます' : 'の番');
     if(w.innerHTML !== html) w.innerHTML = html;
@@ -11763,6 +11773,21 @@ function netDecorateSetup(){
     inp.value = m ? m.name : '';
     inp.placeholder = '参加待ち';
     inp.disabled = true;
+  });
+  netSeatNotices();
+}
+// 開始前：Player の席に入れたか・入れなかったかが変わった人にだけ、ホストから知らせる
+function netSeatNotices(){
+  if(!NET.host || (NET.game && G && G.phase !== 'over')) return;
+  NET.seatState = NET.seatState || {};
+  NET.members.filter(m => m.token !== NET.token && m.online).forEach(m => {
+    const now = netLobbySeated(m.token) ? 'in' : 'out', was = NET.seatState[m.token];
+    if(now === was) return;
+    NET.seatState[m.token] = now;
+    if(now === 'out') netSend({t:'notice', to: m.token,
+      text: 'Player の席が空いていないので、今は観戦です。ホストが席を Player にすると参加できます。'});
+    else if(was === 'out') netSend({t:'notice', to: m.token,
+      text: '席が用意されました。ホストが始めるのを待っています。'});
   });
 }
 
@@ -11943,6 +11968,12 @@ function netHubCreate(room, pass){
       case 'botstat':
         me.stat = msg.stat;
         return;
+      case 'notice': {
+        if(!me.self) return;
+        const t = H.members.find(m => m.token === msg.to);
+        if(t) to(t, {t:'notice', text: String(msg.text || '').slice(0, 200)});
+        return;
+      }
     }
   };
   return H;
@@ -12090,6 +12121,12 @@ function netOnMessage(m){
         '<br><button class="primary" id="netReload" style="margin-top:.6rem">読み込み直す</button>';
       $('netReload').onclick = netReloadFresh;
       break;
+    case 'notice':
+      // ホストからの知らせ（席に入れたか、観戦か）
+      netToast(m.text);
+      netNote(m.text, false);
+      sfx('turn');
+      break;
     case 'verNote':
       if(NET.verNoted) break;
       NET.verNoted = true;
@@ -12130,7 +12167,10 @@ function netOnMessage(m){
   }
 }
 function netMembers(list){
+  const prev = NET.members;
   NET.members = list || [];
+  if(NET.seenMembers) netMemberNotes(prev, NET.members);   // つないだ直後の一覧では知らせない
+  NET.seenMembers = true;
   const me = NET.members.find(x => x.token === NET.token);
   NET.host = !!(me && me.host);
   document.body.classList.toggle('net-guest', !NET.host);
@@ -12138,6 +12178,45 @@ function netMembers(list){
   if($('setupModal').classList.contains('show')) renderSetupModal();
   if($('netModal').classList.contains('show')) netRenderModal();
   netPresent();
+}
+
+/* --- 人の出入りの知らせ ---
+   開始画面の枠の大きさを変えないよう、画面の上に一時的に出す */
+function netToast(text){
+  const el = $('netToast');
+  el.textContent = text;
+  el.classList.add('show');
+  clearTimeout(NET.toastT);
+  NET.toastT = setTimeout(() => el.classList.remove('show'), 4200);
+}
+function netMemberNotes(prev, now){
+  const came = [], gone = [];
+  now.forEach(m => {
+    if(m.token === NET.token) return;
+    const p = prev.find(x => x.token === m.token);
+    if(m.online && !(p && p.online)) came.push(m);
+    else if(!m.online && p && p.online) gone.push(m);
+  });
+  if(!came.length && !gone.length) return;
+  const nm = m => m.name || '名前なし';
+  const parts = [];
+  const playing = NET.game && G && G.phase !== 'over';
+  came.forEach(m => {
+    if(playing) parts.push(nm(m) + (NET.game.seats.includes(m.token) ? 'が戻りました' : 'が観戦で入りました'));
+    else if(NET.host && !netLobbySeated(m.token)) parts.push(nm(m) + 'が入りました。Player の席が空いていないので観戦です（席を Player にすると参加できます）');
+    else parts.push(nm(m) + 'が入りました');
+  });
+  gone.forEach(m => parts.push(nm(m) + 'が切断しました'));
+  netToast(parts.join('　'));
+  if(came.length) sfx('turn');
+}
+// 開始前：この人が Player の席に入れているか（入った順に Player の席へ入る）
+function netLobbySeated(token){
+  const n = Math.max(3, Math.min(4, CFG.count || 4));
+  let seats = 0;
+  for(let i = 1; i < n; i++) if(CFG.slots[i].type === 'human') seats++;
+  const at = NET.members.filter(m => m.token !== NET.token && m.online).findIndex(m => m.token === token);
+  return at >= 0 && at < seats;
 }
 
 /* --- 部屋を作る・入る（インターネット） --- */
