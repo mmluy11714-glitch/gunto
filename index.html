@@ -11329,6 +11329,7 @@ $('startGame').onclick = () => {
   saveCfg();
   applySpeed();
   if(NET.on){ netHostStart(); return; }   // ネット対戦：全員の端末で同時に始める
+  if(netSoloHumans()){ netOpenEntry(NET_PLAYER_MSG); return; }   // Player の席はネット対戦でだけ使える
   $('setupModal').classList.remove('show');
   start();
 };
@@ -11728,8 +11729,27 @@ function netSetName(v){
 const renderSetupModalSolo = renderSetupModal;
 renderSetupModal = function(){
   renderSetupModalSolo();
-  if(NET.on) netDecorateSetup();
+  if(NET.on) netDecorateSetup(); else netDecorateSolo();
 };
+/* 1台の端末を回して遊ぶ方式（ホットシート）はやめた（2026-09-22）。
+   相手の席を Player にするのは、別の端末の人とネット対戦するとき。選んだらネット対戦の画面を開く */
+const NET_PLAYER_MSG = 'Player の席には、ネット対戦で別の端末の人が入ります。部屋を作って、URLと合言葉を送ってください。';
+function netSoloHumans(){
+  const n = Math.max(3, Math.min(4, CFG.count || 4));
+  return CFG.slots.slice(1, n).filter(sl => sl.type === 'human').length;
+}
+function netDecorateSolo(){
+  [...$('optSlots').children].forEach((row, i) => {
+    if(i === 0) return;
+    row.querySelectorAll('.seg button').forEach(b => {
+      if(b.textContent !== 'Player') return;
+      const pick = b.onclick;
+      b.onclick = () => { pick(); saveCfg(); netOpenEntry(NET_PLAYER_MSG); };
+    });
+    const inp = row.querySelector('.slot-head input');
+    if(inp && CFG.slots[i] && CFG.slots[i].type === 'human'){ inp.value = ''; inp.placeholder = 'ネット対戦'; inp.disabled = true; }
+  });
+}
 function netDecorateSetup(){
   const rows = [...$('optSlots').children];
   const others = NET.members.filter(m => m.token !== NET.token && m.online);
