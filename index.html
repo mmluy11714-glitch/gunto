@@ -6113,7 +6113,8 @@ function render(){
 
   // 手札は見ている人のもの（ネット対戦では自分の席、それ以外は操作中の人）
   const me = G.players[viewPid()];
-  $('hand').innerHTML = G.hidden
+  $('hand').innerHTML = !me ? `<div class="masked">観戦中は手札を見られません</div>`
+    : G.hidden
     ? `<div class="masked">手札は伏せています</div>`
     : RES.map(r => `
     <div class="res" data-res="${r}">
@@ -11374,7 +11375,9 @@ Object.assign(NET, {
   prefs: {}, mismatchSince: 0, reported: -1, checkAt: -1, desync: null, lobby: false
 });
 // 読み込み直後の描画からも呼ぶので、関数宣言にしておく（const だと宣言前に呼べない）
-function viewPid(){ return (NET.on && NET.pid !== null) ? NET.pid : activeHuman(); }
+// 観戦の人（席の無い参加者）は -1：だれの手札も、隠れた勝利点も見せない
+// （開始前は席が決まっていないので、背景の盤は1人用と同じに見せる）
+function viewPid(){ return NET.on && NET.game ? (NET.pid !== null ? NET.pid : -1) : activeHuman(); }
 function netIdle(){ return NETW.pend === 0; }
 function netPref(pid, key){
   if(!NET.on) return CFG[key];
@@ -11785,7 +11788,7 @@ function netSeatNotices(){
     if(now === was) return;
     NET.seatState[m.token] = now;
     if(now === 'out') netSend({t:'notice', to: m.token,
-      text: 'Player の席が空いていないので、今は観戦です。ホストが席を Player にすると参加できます。'});
+      text: 'Player の席が空いていないので、今は観戦です。' + netNoSeatWhy(false) + '。'});
     else if(was === 'out') netSend({t:'notice', to: m.token,
       text: '席が用意されました。ホストが始めるのを待っています。'});
   });
@@ -12203,12 +12206,20 @@ function netMemberNotes(prev, now){
   const playing = NET.game && G && G.phase !== 'over';
   came.forEach(m => {
     if(playing) parts.push(nm(m) + (NET.game.seats.includes(m.token) ? 'が戻りました' : 'が観戦で入りました'));
-    else if(NET.host && !netLobbySeated(m.token)) parts.push(nm(m) + 'が入りました。Player の席が空いていないので観戦です（席を Player にすると参加できます）');
+    else if(NET.host && !netLobbySeated(m.token)) parts.push(nm(m) + 'が入りました。Player の席が空いていないので観戦です（' + netNoSeatWhy(true) + '）');
     else parts.push(nm(m) + 'が入りました');
   });
   gone.forEach(m => parts.push(nm(m) + 'が切断しました'));
   netToast(parts.join('　'));
   if(came.length) sfx('turn');
+}
+// 席に入れなかった人への案内。CPUの席を Player にすれば入れるのか、4人にすれば入れるのか、もう入れないのか
+function netNoSeatWhy(forHost){
+  const n = Math.max(3, Math.min(4, CFG.count || 4));
+  const cpuSeats = CFG.slots.slice(1, n).filter(sl => sl.type !== 'human').length;
+  if(cpuSeats) return forHost ? '席を Player にすると参加できます' : 'ホストが席を Player にすると参加できます';
+  if(n < 4) return forHost ? '4人にして席を Player にすると参加できます' : 'ホストが4人にすると参加できます';
+  return 'この対戦は4人までです';
 }
 // 開始前：この人が Player の席に入れているか（入った順に Player の席へ入る）
 function netLobbySeated(token){
