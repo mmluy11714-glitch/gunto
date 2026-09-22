@@ -11677,6 +11677,20 @@ const NET_PAGES_URL = 'https://mmluy11714-glitch.github.io/gunto/';          // 
 const NET_PEER_PREFIX = 'gunto-kaitakusha-v1-';
 const NET_ROOM_CHARS = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';   // 見間違えやすい 0/O・1/I/L を除く
 function netSend(obj){ if(NET.link) NET.link.send(obj); }
+/* ゲームの版。本体のスクリプトの中身から作るので、直すたびに手で書き換えなくてよい。
+   参加するときにホストの版と比べ、違えば入らせない（同じ操作でも結果が変わり、食い違うため） */
+const NET_VER = window.ISLAND_FAKEVER || (() => {
+  const t = (document.currentScript && document.currentScript.textContent) || '';
+  let h = 0x811c9dc5;
+  for(let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 16777619);
+  return (h >>> 0).toString(36) + t.length.toString(36);
+})();
+// 読み込み直す。GitHub Pages は古い版をしばらく覚えているので、URLを変えて最新を取りに行く
+function netReloadFresh(){
+  const u = new URL(location.href);
+  u.searchParams.set('v', Date.now().toString(36));
+  location.replace(u.toString());
+}
 const netRandom = n => [...crypto.getRandomValues(new Uint8Array(n))].map(b => NET_ROOM_CHARS[b % NET_ROOM_CHARS.length]).join('');
 function netShareUrl(room){
   const base = location.protocol.startsWith('http') ? location.origin + location.pathname : NET_PAGES_URL;
@@ -11692,7 +11706,7 @@ function netLinkDown(){
   $('netDot').classList.remove('ok');
   netRenderModal();
 }
-const netHello = extra => ({t:'hello', token: NET.token, name: NET.name, autoNo: CFG.autoNo,
+const netHello = extra => ({t:'hello', token: NET.token, name: NET.name, autoNo: CFG.autoNo, ver: NET_VER,
                             game: NET.game ? NET.game.id : null, ...extra});
 
 /* LAN：ネット対戦サーバーへ WebSocket でつなぐ */
@@ -11703,7 +11717,7 @@ function netConnectLan(){
   ws.onopen = () => NET.link.send(netHello());
   ws.onmessage = e => { try{ netOnMessage(JSON.parse(e.data)); }catch(err){ console.error('[net]', err); } };
   ws.onclose = () => {
-    if(NET.ws !== ws) return;
+    if(NET.ws !== ws || NET.stopped) return;
     netLinkDown();
     setTimeout(netConnectLan, 1500);
   };
@@ -11756,6 +11770,13 @@ function netHubCreate(room, pass){
     all({t:'desync', i, where});
   };
   H.join = (msg, ep) => {
+    if(!ep.self && msg.ver !== NET_VER){
+      ep.send({t:'version'});
+      setTimeout(() => ep.close(), 400);
+      const self = H.members.find(m => m.self);
+      if(self) to(self, {t:'verNote'});
+      return null;
+    }
     if(!ep.self && H.pass && msg.pass !== H.pass){
       ep.send({t:'denied'});
       setTimeout(() => ep.close(), 400);
@@ -11907,7 +11928,7 @@ async function netJoinP2P(room, pass){
       if(conn !== c) return;
       conn = null;
       netLinkDown();
-      if(!NET.denied){ NET.peerState = 'ホストとの接続が切れました。つなぎ直しています…'; again(2000); }
+      if(!NET.denied && !NET.stopped){ NET.peerState = 'ホストとの接続が切れました。つなぎ直しています…'; again(2000); }
     };
     c.on('close', down);
     c.on('error', down);
@@ -11964,6 +11985,28 @@ function netOnMessage(m){
         sessionStorage.setItem('island_p2p_msg', '合言葉が違います。確かめてもう一度入れてください。');
       }catch(e){}
       location.reload();
+      break;
+    case 'version':
+      // 自分とホストの版が違う。つなぎ直しても同じなので止めて、読み込み直してもらう
+      NET.stopped = true;
+      NET.peerState = '';
+      netOpenModal();
+      $('netStatus').textContent = 'ホストとゲームの版が違うため、参加できません。';
+      $('netNote').className = 'warn';
+      $('netNote').innerHTML = 'どちらかが古い版のページを開いています。このページを読み込み直してください。' +
+        'それでも入れないときは、ホストにもページを読み込み直してもらってください。' +
+        '<br><button class="primary" id="netReload" style="margin-top:.6rem">読み込み直す</button>';
+      $('netReload').onclick = netReloadFresh;
+      break;
+    case 'verNote':
+      if(NET.verNoted) break;
+      NET.verNoted = true;
+      $('netNote').className = 'warn';
+      $('netNote').innerHTML = 'ゲームの版が違う端末が入ろうとしました。こちらが古い版かもしれません。' +
+        '読み込み直すと最新版になります（部屋と、始まっている対戦の続きは残ります）。' +
+        '<br><button id="netReload" style="margin-top:.6rem">読み込み直す</button>';
+      $('netReload').onclick = netReloadFresh;
+      netOpenModal();
       break;
     case 'members':
       netMembers(m.members);
