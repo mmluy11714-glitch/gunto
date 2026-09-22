@@ -3168,7 +3168,8 @@ async function aiAskFocus(pid, retried){
     }
     CFG.aiModel = next === AI_MODEL_CANVAS && AI_CANVAS ? '' : next;
     saveCfg();
-    log('使えなくなった ' + used + ' の代わりに ' + next + ' を使う');
+    const note = '使えなくなった ' + used + ' の代わりに ' + next + ' を使う';
+    if(NET.on) NET.aiNote = note; else log(note);
     return await aiAskFocus(pid, true);
   }
 }
@@ -3203,6 +3204,7 @@ async function aiAskFocusOnce(pid){
 async function aiPlanTurn(pid){
   const p = G.players[pid];
   if(!p || p.lv !== 'ai' || G.aiOff) return;
+  if(NET.on){ await netAiPlan(p); return; }
   if(!aiUsable()){
     G.aiOff = true;
     log('AIのキーが無いので、この局は' + LEVEL_JA.strong + 'として進める');
@@ -6887,6 +6889,9 @@ function showReplies(me, give, get, replies){
 // 断られたあと、同じ条件のまま別の相手に問い直せるよう画面を開き直す
 function reopenSame(give, get, to){
   if(negoStack.length) return;          // 別の処理が結果を待っている最中は開かない
+  // ネット対戦では使わない。遅れて開くときに「進行中か」を見るため、端末の速さで開く・開かないが分かれ、
+  // 交渉の相手の選択が片方の端末でだけ上書きされて盤が食い違った（2026-09-22）
+  if(NET.on) return;
   // wait() を使う（ネット対戦で、全員の端末がこの画面を開き終えてから次の操作を受ける）
   wait(200).then(() => {
     if(G.phase === 'over' || G.busy) return;
@@ -11373,7 +11378,52 @@ async function netAskAs(p, fn){
   NET.holder = p.id;
   netPresent();
   try{ return await fn(); }
-  finally { NET.holder = prev; netPresent(); }
+  finally {
+    // 選んでいる間に手番が進んで操作する人が変わっていたら、そちらを残す
+    if(NET.holder === p.id) NET.holder = prev;
+    netPresent();
+  }
+}
+
+/* --- 段位AI（Gemini） ---
+   ホストの端末だけが問い合わせ、答えを操作と同じ列に載せて全員に配る。全員がここで待ち、
+   届いた答えで同じように方針を決める（端末ごとに問い合わせると答えが割れて盤が食い違う）。
+   参加者はキーが要らない。ホストが読み込み直して早送りしている間は、記録に残った答えを使う */
+function netAiPlan(p){
+  const seq = NET.aiSeq++;
+  return new Promise(resolve => {
+    NET.aiWait = {seq, pid: p.id, resolve, asked: false};
+  }).then(r => {
+    if(r.note) log(r.note);
+    if(r.off){
+      p.aiFocus = null;
+      G.aiOff = true;
+      log((r.off === 'nokey' ? 'ホストにAIのキーが無いので' : 'Geminiを使えないので') +
+          '、この局は' + LEVEL_JA.strong + 'として進める');
+      return;
+    }
+    p.aiFocus = r.focus;
+    const why = r.reason ? '（' + String(r.reason).slice(0, 30) + '）' : '';
+    log(p.name + 'は' + AI_FOCUS[r.focus].ja + 'を狙う' + why);
+  });
+}
+// ホスト：答えを待っている所まで来ていて、届いた操作をすべて済ませていたら問い合わせる
+function netAiAsk(){
+  const w = NET.aiWait;
+  if(!w || w.asked || !NET.host || NET.fast || NET.queue.length || NET.applied < NET.logLen) return;
+  w.asked = true;
+  (async () => {
+    let r;
+    if(!aiUsable()) r = {off: 'nokey'};
+    else{
+      try{
+        const a = await aiAskFocus(w.pid);
+        r = {focus: a.focus, reason: String(a.reason || '').slice(0, 60)};
+      }catch(e){ r = {off: 'fail'}; }
+    }
+    if(NET.aiNote){ r.note = NET.aiNote; NET.aiNote = ''; }
+    if(NET.aiWait === w) NET.aiOut = {t: 'ai', seq: w.seq, r};
+  })();
 }
 
 /* --- 盤の状態の指紋 ---
@@ -11452,6 +11502,16 @@ function netInput(ev, el){
 }
 // 送るのは、自分の端末が落ち着いていて、届いた操作をすべて済ませた後だけ
 function netFlush(){
+  // 送った操作の返事が長く来ないときは、送り直せる状態に戻す（届いていれば、ハブが古い手数の操作を断る）
+  if(NET.inflight && Date.now() - NET.inflightAt > 6000) NET.inflight = false;
+  if(NET.aiOut && !NET.inflight && NET.connected && netIdle() && !NET.queue.length &&
+     NET.applied >= NET.logLen && !NET.fast){
+    // 届くまで持っておく（受け付けられなかったら送り直す）
+    NET.inflight = true;
+    NET.inflightAt = Date.now();
+    netSend({t:'in', base: NET.applied, hash: netHash(), ev: NET.aiOut});
+    return;
+  }
   const o = NET.outbox;
   if(!o || NET.inflight || !NET.connected) return;
   if(!netIdle() || NET.queue.length || NET.applied < NET.logLen || NET.fast) return;
@@ -11461,6 +11521,7 @@ function netFlush(){
   if(o.el && (!o.el.isConnected || netFind(o.ev) !== o.el)) return;
   if(o.ev.t === 'pick' && !netFindPick(o.ev.d)) return;
   NET.inflight = true;
+  NET.inflightAt = Date.now();
   netSend({t:'in', base: NET.applied, hash: netHash(), ev: o.ev});
 }
 
@@ -11470,12 +11531,25 @@ function netApply(ev){
   try{
     if(ev.t === 'click'){
       const el = netFind(ev);
-      if(el) el.click();
-      else console.warn('[net] 押した物が見つからない', ev);
+      if(el && !el.disabled) el.click();
+      else{
+        // 押した人の画面にはあった物が、この端末には無い（または押せない）。このままだと盤が分かれるので知らせる
+        let n = document.getElementById(ev.root), got = '';
+        for(const i of ev.path) n = n && n.children[i];
+        got = n ? netText(n) + (n.disabled ? '（押せない）' : '') : '（無い）';
+        NET.miss = {i: NET.applied, want: ev.txt, got, root: ev.root, path: ev.path};
+        console.warn('[net] 押した物が見つからない', NET.miss);
+        netSend({t:'desync', i: NET.applied, where: 'click', hash: got, want: ev.txt});
+      }
     } else if(ev.t === 'pick'){
       handlePick(netFindPick(ev.d) || ev.d);
     } else if(ev.t === 'esc'){
       cancelSelecting();
+    } else if(ev.t === 'ai'){
+      if(NET.aiOut && NET.aiOut.seq === ev.seq) NET.aiOut = null;
+      const w = NET.aiWait;
+      if(w && w.seq === ev.seq){ NET.aiWait = null; w.resolve(ev.r); }
+      else console.warn('[net] AIの答えを待っている所が無い', ev);
     }
   } catch(err){
     console.error('[net]', err);
@@ -11516,6 +11590,7 @@ function netPump(){
     applySpeed();
     render();
   }
+  netAiAsk();
   netFlush();
   netPresent();
 }
@@ -11544,8 +11619,6 @@ function netHostStart(){
   seats[0] = NET.token;
   cfg.slots[0].name = NET.name || cfg.slots[0].name;
   humans.forEach((i, k) => { seats[i] = others[k].token; cfg.slots[i].name = others[k].name; });
-  // 段位AI（Gemini）は端末ごとに問い合わせの答えが変わるので、ネット対戦では Hard にする
-  cfg.slots.forEach(sl => { if(sl.type === 'ai') sl.type = 'strong'; });
   const prefs = {};
   seats.forEach((t, i) => {
     const m = t && NET.members.find(x => x.token === t);
@@ -11566,6 +11639,7 @@ function netBegin(game, log){
   NET.reported = -1;
   NET.checkAt = 0;
   NET.desync = null;
+  NET.aiSeq = 0; NET.aiWait = null; NET.aiOut = null; NET.aiNote = '';
   const keep = {};
   NET_LOCAL.forEach(k => { keep[k] = CFG[k]; });
   CFG = {...CFG, ...JSON.parse(JSON.stringify(game.cfg)), ...keep};
@@ -11668,8 +11742,6 @@ function netDecorateSetup(){
       inp.oninput = () => { netSetName(inp.value); };
       return;
     }
-    // AI（Gemini）は選べない
-    row.querySelectorAll('.seg button').forEach(b => { if(b.textContent === 'AI') b.disabled = true; });
     if(i >= CFG.count || CFG.slots[i].type !== 'human') return;
     const m = others[k++];
     inp.value = m ? m.name : '';
@@ -12016,6 +12088,9 @@ function netOnMessage(m){
       netMembers(m.members);
       break;
     case 'start':
+      // 前の対戦がまだ動いている（CPUの手番の途中など）ところに新しい対戦を重ねると、古い処理が新しい盤を壊す。
+      // 読み込み直して、つなぎ直したときに新しい対戦を受け取る
+      if(NET.game && G && G.phase !== 'over' && NET.game.id !== m.game.id){ location.reload(); break; }
       netBegin(m.game, []);
       break;
     case 'in':
