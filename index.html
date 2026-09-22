@@ -11329,7 +11329,7 @@ $('startGame').onclick = () => {
   saveCfg();
   applySpeed();
   if(NET.on){ netHostStart(); return; }   // ネット対戦：全員の端末で同時に始める
-  if(netSoloHumans()){ netOpenEntry(NET_PLAYER_MSG); return; }   // Player の席はネット対戦でだけ使える
+  if(netSoloHumans()){ netOpenEntry(NET_PLAYER_MSG, 'create'); return; }   // Player の席はネット対戦でだけ使える
   $('setupModal').classList.remove('show');
   start();
 };
@@ -11732,8 +11732,9 @@ renderSetupModal = function(){
   if(NET.on) netDecorateSetup(); else netDecorateSolo();
 };
 /* 1台の端末を回して遊ぶ方式（ホットシート）はやめた（2026-09-22）。
-   相手の席を Player にするのは、別の端末の人とネット対戦するとき。選んだらネット対戦の画面を開く */
-const NET_PLAYER_MSG = 'Player の席には、ネット対戦で別の端末の人が入ります。部屋を作って、URLと合言葉を送ってください。';
+   相手の席を Player にするのは、別の端末の人とネット対戦するとき。
+   「島に渡る」を押したら、渡る前に部屋を作る画面（合言葉の入力）を出す */
+const NET_PLAYER_MSG = 'Player の席には、ネット対戦で別の端末の人が入ります。合言葉を決めて部屋を作り、URLと合言葉を送ってください。';
 function netSoloHumans(){
   const n = Math.max(3, Math.min(4, CFG.count || 4));
   return CFG.slots.slice(1, n).filter(sl => sl.type === 'human').length;
@@ -11741,11 +11742,6 @@ function netSoloHumans(){
 function netDecorateSolo(){
   [...$('optSlots').children].forEach((row, i) => {
     if(i === 0) return;
-    row.querySelectorAll('.seg button').forEach(b => {
-      if(b.textContent !== 'Player') return;
-      const pick = b.onclick;
-      b.onclick = () => { pick(); saveCfg(); netOpenEntry(NET_PLAYER_MSG); };
-    });
     const inp = row.querySelector('.slot-head input');
     if(inp && CFG.slots[i] && CFG.slots[i].type === 'human'){ inp.value = ''; inp.placeholder = 'ネット対戦'; inp.disabled = true; }
   });
@@ -12145,8 +12141,9 @@ function netMembers(list){
 }
 
 /* --- 部屋を作る・入る（インターネット） --- */
-function netOpenEntry(msg){
+function netOpenEntry(msg, mode){
   NET.entry = true;
+  NET.entryMode = mode || '';            // create＝部屋を作るだけ（Player の席を選んで始めようとした）
   NET.entryMsg = msg || '';
   netRenderModal();
   $('netModal').classList.add('show');
@@ -12162,10 +12159,11 @@ function netRenderEntry(){
   const make = `<div class="net-sec"><div class="picklabel">部屋を作る（あなたがホスト）</div>
       <div class="net-row"><input id="netNewPass" type="text" maxlength="16" placeholder="合言葉を決める" autocomplete="off" spellcheck="false"></div>
       <button${room ? '' : ' class="primary"'} id="netCreate">部屋を作る</button></div>`;
-  if(box.dataset.room !== room || !box.innerHTML){
-    box.dataset.room = room;
-    box.innerHTML = room ? join : make + join;
-    $('netEnter').onclick = () => {
+  const key = room + '|' + (NET.entryMode || '');
+  if(box.dataset.key !== key || !box.innerHTML){
+    box.dataset.key = key;
+    box.innerHTML = room ? join : NET.entryMode === 'create' ? make : make + join;
+    if($('netEnter')) $('netEnter').onclick = () => {
       const r = $('netRoomIn').value.toUpperCase().replace(/[^A-Z0-9]/g, '');
       const p = $('netPassIn').value.trim();
       if(r.length !== 6){ netOpenEntry('部屋番号は6文字です。'); return; }
@@ -12219,9 +12217,10 @@ function netRenderModal(){
   if(entry){
     $('netStatus').textContent = NET.entryRoom
       ? `部屋 ${NET.entryRoom} に入ります。ホストから聞いた合言葉を入れてください。`
+      : NET.entryMode === 'create' ? '島に渡る前に、ネット対戦の部屋を作ります。'
       : 'インターネットで遊びます。ホストが部屋を作り、URLと合言葉をほかの人に伝えます。';
     netRenderEntry();
-    netNote(NET.entryMsg || '', !!NET.entryMsg);
+    netNote(NET.entryMsg || '', !!NET.entryMsg && NET.entryMode !== 'create');   // 部屋を作る案内は警告の色にしない
   } else {
     $('netStatus').textContent = NET.peerState ? NET.peerState
       : !NET.connected ? (NET.mode === 'p2p' ? 'ホストにつないでいます…' : 'サーバーに接続しています…')
