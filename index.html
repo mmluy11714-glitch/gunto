@@ -4,7 +4,9 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
 <title>群島の開拓者</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<!-- 部品は同じ場所の lib/ から読む（公開ページやLANのサーバーが置いている）。無いときだけ cdnjs から読む -->
+<script src="lib/three.min.js"></script>
+<script>window.THREE || document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');</script>
 <style>
   :root{
     --sea-deep:#0d3b52;
@@ -11625,10 +11627,18 @@ function netDrawQr(url){
     box.innerHTML = q.createImgTag(4, 0);
   };
   if(window.qrcode){ draw(); return; }
-  const sc = document.createElement('script');
-  sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js';
-  sc.onload = draw;
-  document.head.appendChild(sc);
+  netLoadLib('qrcode.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js').then(draw, () => {});
+}
+// 部品を lib/ から読み、読めなければ cdnjs から読む
+function netLoadLib(file, cdn){
+  const load = src => new Promise((ok, ng) => {
+    const sc = document.createElement('script');
+    sc.src = src;
+    sc.onload = ok;
+    sc.onerror = () => { sc.remove(); ng(new Error(src)); };
+    document.head.appendChild(sc);
+  });
+  return load('lib/' + file).catch(() => load(cdn));
 }
 function netSetName(v){
   NET.name = String(v || '').trim().slice(0, 8);
@@ -11726,13 +11736,7 @@ function netConnectLan(){
 /* インターネット：PeerJS を読み込む */
 function netLoadPeer(){
   if(window.Peer) return Promise.resolve();
-  return new Promise((ok, ng) => {
-    const sc = document.createElement('script');
-    sc.src = 'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js';
-    sc.onload = ok;
-    sc.onerror = () => ng(new Error('PeerJS を読み込めない'));
-    document.head.appendChild(sc);
-  });
+  return netLoadLib('peerjs.min.js', 'https://cdnjs.cloudflare.com/ajax/libs/peerjs/1.5.4/peerjs.min.js');
 }
 
 /* ハブ（ホストのページの中で動く、順番を決める係）。ネット対戦/server.js の onMessage と同じ決まりで動く */
