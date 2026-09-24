@@ -7682,6 +7682,37 @@ function xSettlerSpots(pid){
   });
   return out;
 }
+/* 船着き場・船が埋まっていても、中の自分の駒（入植者・船員）を手元に戻せば置ける（C-3）。
+   魚群と香辛料の袋は手元に戻せないので、それが載っている所は対象にしない。人の席だけが使う */
+function xClearSpots(pid, what){
+  const out = [];
+  const ok = (x, isBasin) => {
+    const cargo = isBasin ? x.basin : x.cargo;
+    if(cargo === 'fish' || (x.sacks || 0) > 0) return false;
+    // 入植者を置く：何か載っている所。船員を置く：入植者が載っている所（船員2人なら、戻しても同じなので出さない）
+    return what === 'settler' ? (cargo === 'settler' || (x.crews || 0) > 0) : cargo === 'settler';
+  };
+  G.vertices.forEach(v => {
+    if(ownHarbor(v.id, pid) && ok(v.building, true)) out.push({kind: 'basin', id: v.id});
+  });
+  shipsOf(pid).forEach(s => {
+    if(ok(s, false) && G.edges[s.edge].v.some(vi => ownHarbor(vi, pid))) out.push({kind: 'hold', id: s.id});
+  });
+  return out;
+}
+function xClearOut(target, pid){
+  const p = G.players[pid];
+  const x = target.kind === 'basin' ? G.vertices[target.id].building : shipById(target.id);
+  const back = [];
+  const cargo = target.kind === 'basin' ? x.basin : x.cargo;
+  if(cargo === 'settler'){
+    p.stock.settler++; back.push('入植者');
+    if(target.kind === 'basin') x.basin = null; else x.cargo = null;
+  }
+  if(x.crews){ p.stock.crew += x.crews; back.push(`船員${x.crews}人`); x.crews = 0; }
+  if(target.kind === 'basin') updateBasinMesh(G.vertices[target.id]); else updateCargoMesh(x);
+  if(back.length) log(`${p.name}が${back.join('と')}を手元に戻した`);
+}
 // 入植船の端が指している陸の交差点（H-4）
 function xFoundSpots(s){
   if(!s || s.cargo !== 'settler' || G.players[s.owner].stock.settlement <= 0) return [];
@@ -8390,10 +8421,10 @@ function renderActionsX(btn, me){
     btn(`船 ${me.stock.ship}/${STOCK_X.ship}`, costX('ship'),
         toggle('xship', me.stock.ship > 0 ? '港町の隣の海路を選ぶ' : '港町の隣の海路を選ぶ（そのあと1隻を引き上げる）'),
         {disabled: !shipOk, active: G.mode === 'xship' || G.mode === 'xscrap'});
-    btn(`入植者 ${me.stock.settler}/${STOCK_X.settler}`, costX('settler'), toggle('xsettler', '港町か、その隣の空いた船を選ぶ'),
-        {disabled: !(me.stock.settler > 0 && xAfford(me, 'settler') && xSettlerSpots(pid).length), active: G.mode === 'xsettler'});
-    if(isPL()) btn(`船員 ${me.stock.crew}/${STOCK_CREW}`, costX('crew'), toggle('xcrew', '港町か、その隣の空いた船を選ぶ'),
-        {disabled: !(me.stock.crew > 0 && xAfford(me, 'crew') && xCrewSpots(pid).length), active: G.mode === 'xcrew'});
+    btn(`入植者 ${me.stock.settler}/${STOCK_X.settler}`, costX('settler'), toggle('xsettler', xClearSpots(pid, 'settler').length ? '港町か、その隣の船を選ぶ（赤は中の駒を手元に戻して置く）' : '港町か、その隣の空いた船を選ぶ'),
+        {disabled: !(me.stock.settler > 0 && xAfford(me, 'settler') && (xSettlerSpots(pid).length || xClearSpots(pid, 'settler').length)), active: G.mode === 'xsettler'});
+    if(isPL()) btn(`船員 ${me.stock.crew}/${STOCK_CREW}`, costX('crew'), toggle('xcrew', xClearSpots(pid, 'crew').length ? '港町か、その隣の船を選ぶ（赤は入植者を手元に戻して置く）' : '港町か、その隣の空いた船を選ぶ'),
+        {disabled: !(me.stock.crew > 0 && xAfford(me, 'crew') && (xCrewSpots(pid).length || xClearSpots(pid, 'crew').length)), active: G.mode === 'xcrew'});
     if(fastGoldLeft(pid) > 0) btn(`金貨に換える ${fastGoldLeft(pid)}回`, '資源1枚→金貨1枚', async () => {
       if(G.busy) return;
       const picks = await pickResources('資源を金貨に換える', '手札の資源1枚を金貨1枚に換える（香辛料の村の恩恵）', 1, r => me.res[r] > 0);
@@ -8416,7 +8447,7 @@ function renderActionsX(btn, me){
   if(G.phase === 'sail'){
     const s = shipById(G.sailShip);
     if(s){
-      shipOps(s).forEach(o => {
+      shipOpsByCount(s).forEach(o => {
         btn(opLabel(o), opNote(o), () => {
           if(G.busy) return;
           runShipOp(s, o);
@@ -8464,12 +8495,17 @@ function showPickablesX(mk, pid){
     else if(G.mode === 'xharbor') xHarborSpots(pid).forEach(vi => V(vi, .52, {kind: 'xharbor', id: vi}, 0xfff2c4));
     else if(G.mode === 'xship') xShipBuildSpots(pid).forEach(ei => E(ei, .32, .14, {kind: 'xship', id: ei}, 0x35d2f5));
     else if(G.mode === 'xscrap') shipsOf(pid).forEach(s => S(s, {kind: 'xscrap', id: s.id}, 0xe0674f));
-    else if(G.mode === 'xsettler') xSettlerSpots(pid).forEach(t => t.kind === 'basin'
-      ? V(t.id, .52, {kind: 'xbasin', id: t.id}, 0xfff2c4)
-      : S(shipById(t.id), {kind: 'xhold', id: t.id}, 0xfff2c4));
-    else if(G.mode === 'xcrew') xCrewSpots(pid).forEach(t => t.kind === 'basin'
-      ? V(t.id, .52, {kind: 'xcrewbasin', id: t.id}, 0xfff2c4)
-      : S(shipById(t.id), {kind: 'xcrewhold', id: t.id}, 0xfff2c4));
+    else if(G.mode === 'xsettler' || G.mode === 'xcrew'){
+      const what = G.mode === 'xsettler' ? 'settler' : 'crew';
+      const mark = (t, clear) => {
+        const d = {kind: what === 'settler' ? (t.kind === 'basin' ? 'xbasin' : 'xhold') : (t.kind === 'basin' ? 'xcrewbasin' : 'xcrewhold'),
+                   id: t.id, clear};
+        const col = clear ? 0xe0674f : 0xfff2c4;
+        if(t.kind === 'basin') V(t.id, .52, d, col); else S(shipById(t.id), d, col);
+      };
+      (what === 'settler' ? xSettlerSpots(pid) : xCrewSpots(pid)).forEach(t => mark(t, false));
+      xClearSpots(pid, what).forEach(t => mark(t, true));
+    }
     return;
   }
   if(G.phase !== 'sail') return;
@@ -8499,8 +8535,8 @@ async function handlePickX(d, pid){
       if(r !== 'choose'){ G.phase = back; G.pirateReturn = null; }
       break;
     }
-    case 'xcrewbasin': xBuildCrew({kind: 'basin', id: d.id}, pid); G.mode = null; break;
-    case 'xcrewhold':  xBuildCrew({kind: 'hold', id: d.id}, pid); G.mode = null; break;
+    case 'xcrewbasin': if(d.clear) xClearOut({kind: 'basin', id: d.id}, pid); xBuildCrew({kind: 'basin', id: d.id}, pid); G.mode = null; break;
+    case 'xcrewhold':  if(d.clear) xClearOut({kind: 'hold', id: d.id}, pid); xBuildCrew({kind: 'hold', id: d.id}, pid); G.mode = null; break;
     case 'xroad':   xBuildRoad(d.id, pid); G.mode = null; break;
     case 'xsettle': xBuildSettlement(d.id, pid); G.mode = null; break;
     case 'xharbor': xBuildHarbor(d.id, pid); G.mode = null; break;
@@ -8520,8 +8556,8 @@ async function handlePickX(d, pid){
       G.mode = null;
       break;
     }
-    case 'xbasin': xBuildSettler({kind: 'basin', id: d.id}, pid); G.mode = null; break;
-    case 'xhold':  xBuildSettler({kind: 'hold', id: d.id}, pid); G.mode = null; break;
+    case 'xbasin': if(d.clear) xClearOut({kind: 'basin', id: d.id}, pid); xBuildSettler({kind: 'basin', id: d.id}, pid); G.mode = null; break;
+    case 'xhold':  if(d.clear) xClearOut({kind: 'hold', id: d.id}, pid); xBuildSettler({kind: 'hold', id: d.id}, pid); G.mode = null; break;
     case 'xpick':
       G.sailShip = d.id;
       render();
@@ -9120,11 +9156,11 @@ function doCargoOp(s, o){
 }
 const opLabel = o => ({load: `${LARGE_JA[o.what]}を積む`, unload: `${LARGE_JA[o.what]}を降ろす`,
   loadCrew: `船員${o.n}人を積む`, unloadCrew: `船員${o.n}人を降ろす`, loadSack: `香辛料${o.n}袋を積む`,
-  unloadSack: `香辛料${o.n}袋を降ろす`, swap: '積荷を入れ替える', raid: `砦に船員${o.n}人を送る`,
-  pickup: `砦の船員${o.n}人を拾う`, catch: '魚群を積む', visit: '村に船員を置く', deliver: '評議会の島に届ける'})[o.op];
+  unloadSack: `香辛料${o.n}袋を降ろす`, swap: '積荷を入れ替える', raid: `${o.side ? o.side + 'の' : ''}砦に船員${o.n}人を送る`,
+  pickup: `${o.side ? o.side + 'の' : ''}砦の船員${o.n}人を拾う`, catch: '魚群を積む', visit: '村に船員を置く', deliver: '評議会の島に届ける'})[o.op];
 const opNote = o => ({load: '港町から船へ', unload: '船から港町へ', loadCrew: '港町から船へ',
   unloadCrew: '船から港町へ', loadSack: '港町から船へ', unloadSack: '船から港町へ', swap: '港町と船で',
-  raid: '3人で陥落', pickup: '砦から船へ', catch: '漁場から船へ', visit: '袋を1つ積み、恩恵を得る',
+  raid: o.hex !== undefined && G.hexes[o.hex].lair ? `いま${lairCrewTotal(G.hexes[o.hex])}人／${LAIR_CREWS}人で陥落` : '3人で陥落', pickup: '砦から船へ', catch: '漁場から船へ', visit: '袋を1つ積み、恩恵を得る',
   deliver: '任務が進む'})[o.op];
 
 /* --- 海賊の砦（L-1〜L-5）------------------------------------ */
@@ -9636,6 +9672,30 @@ function missionBadges(p){
 /* --- 積荷 --------------------------------------------------- */
 const smallOn = x => (x.crews || 0) + (x.sacks || 0);
 function shipOps(s){ return [...cargoOps(s), ...lairOps(s), ...missionOps(s)]; }
+/* 人の席のボタン用。船員・袋は人数（袋数）を選べるように、最大から1まで並べる（L-2・C-2）。
+   CPUは shipOps のまま（いつも送れるだけ送る） */
+const COUNT_OPS = ['raid', 'pickup', 'loadCrew', 'unloadCrew', 'loadSack', 'unloadSack'];
+function shipOpsByCount(s){
+  const out = [];
+  shipOps(s).forEach(o => {
+    if(!COUNT_OPS.includes(o.op) || !(o.n > 1)) { out.push(o); return; }
+    for(let k = o.n; k >= 1; k--) out.push({...o, n: k});
+  });
+  // 砦が2つ隣り合うと同じ文言のボタンが並ぶので、船から見た方角を添える
+  const lairs = new Set(out.filter(o => o.op === 'raid' || o.op === 'pickup').map(o => o.hex));
+  if(lairs.size > 1){
+    const e = G.edges[s.edge], a = G.vertices[e.v[0]], b = G.vertices[e.v[1]];
+    const mx = (a.x + b.x) / 2, mz = (a.z + b.z) / 2;
+    out.forEach(o => {
+      if(o.op !== 'raid' && o.op !== 'pickup') return;
+      const h = G.hexes[o.hex], dx = h.x - mx, dz = h.z - mz;
+      const ns = Math.abs(dz) > Math.abs(dx) * .4 ? (dz < 0 ? '北' : '南') : '';
+      const ew = Math.abs(dx) > Math.abs(dz) * .4 ? (dx > 0 ? '東' : '西') : '';
+      o.side = ns + ew;
+    });
+  }
+  return out;
+}
 function missionOps(s){
   const out = [];
   if(!G.explore) return out;
