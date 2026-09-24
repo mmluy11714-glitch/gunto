@@ -5385,9 +5385,24 @@ function rollDice3D(a, b){
   mats.forEach(m => { m.opacity = 1; });
   diceGroup.visible = true;
   const vals = [a, b], start = [], target = [], spin = [], held = [null, null];
-  const HIGH = 4.0, LAND = 2.45;
+  /* 盤をどこへ動かしても、画面の真ん中に落とす。画面中央を通る視線の上、
+     盤面までの8割ほど手前に置き、カメラとの距離に合わせて大きさをそろえる */
+  pointer.set(0, 0);
+  raycaster.setFromCamera(pointer, camera);
+  const ray = raycaster.ray;
+  const hitG = ray.intersectPlane(GROUND, new THREE.Vector3());
+  const dist = (hitG ? ray.origin.distanceTo(hitG) : cam.dist) * .78;
+  const sc = Math.min(3, Math.max(.35, dist / 10.5));
+  const at = ray.origin.clone().addScaledVector(ray.direction, dist);
+  const right = new THREE.Vector3().setFromMatrixColumn(camera.matrixWorld, 0);
+  right.y = 0;
+  if(right.lengthSq() < 1e-6) right.set(1, 0, 0);
+  right.normalize();
+  const LAND = at.y, HIGH = LAND + 1.55 * sc;
   diceGroup.children.forEach((m, i) => {
-    m.position.set((i - .5) * 1.5, HIGH, -0.6);
+    m.scale.setScalar(sc);
+    m.position.copy(at).addScaledVector(right, (i - .5) * 1.5 * sc);
+    m.position.y = HIGH;
     m.quaternion.setFromEuler(new THREE.Euler(
       Math.random() * 6.28, Math.random() * 6.28, Math.random() * 6.28));
     start.push(m.quaternion.clone());
@@ -5402,7 +5417,7 @@ function rollDice3D(a, b){
     diceGroup.children.forEach((m, i) => {
       // 落下したあと小さく跳ねる
       let y = HIGH + (LAND - HIGH) * easeOut(Math.min(1, k / .55));
-      if(k > .55) y = LAND + Math.abs(Math.sin((k - .55) * 7)) * (1 - (k - .55) / .45) * .45;
+      if(k > .55) y = LAND + Math.abs(Math.sin((k - .55) * 7)) * (1 - (k - .55) / .45) * .45 * sc;
       m.position.y = y;
       if(k < .72){
         m.quaternion.setFromEuler(new THREE.Euler(
@@ -5413,7 +5428,7 @@ function rollDice3D(a, b){
       }
     });
   }).then(() => wait(200)).then(() => tween(270, k => {
-    diceGroup.children.forEach(m => { m.position.y = LAND + k * .9; });
+    diceGroup.children.forEach(m => { m.position.y = LAND + k * .9 * sc; });
     mats.forEach(m => { m.opacity = Math.max(0, 1 - k); });
   })).then(() => { diceGroup.visible = false; });
 }
