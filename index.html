@@ -5061,7 +5061,7 @@ function moveRobberMesh(hex){
     robberMesh.position.lerpVectors(from, to, easeInOut(k));
     robberMesh.position.y = .46 + Math.sin(Math.PI * k) * 1.1;   // 弧を描く
     robberMesh.rotation.y = k * Math.PI * 2;
-  });
+  }).then(() => { buildDust(hex.x, TOP_Y, hex.z, .8); });   // 着地の土煙（待たない）
 }
 
 /* --- 収穫と建設の演出 --------------------------------------- */
@@ -5083,7 +5083,14 @@ function flashHexes(ids){
   return tween(1000, k => {
     const v = Math.sin(Math.PI * Math.min(1, k * 1.15));
     ids.forEach(id => {
-      if(G.hexes[id].mat) G.hexes[id].mat.emissiveIntensity = Math.max(0, v * .30);
+      const h = G.hexes[id];
+      if(h.mat) h.mat.emissiveIntensity = Math.max(0, v * .30);
+      // 数字札が跳ねて1回転する。どの数字で出たかを目で追えるように
+      if(h.token){
+        const j = Math.min(1, k * 1.6);
+        h.token.position.y = TOP_Y + .035 + Math.sin(Math.PI * j) * .42;
+        h.token.rotation.y = Math.PI / 2 + easeInOut(j) * Math.PI * 2;
+      }
     });
     rings.forEach(m => {
       const s = .5 + k * 1.9;
@@ -5093,7 +5100,11 @@ function flashHexes(ids){
     });
   }).then(() => {
     rings.forEach(m => { boardGroup.remove(m); m.material.dispose(); });
-    ids.forEach(id => { if(G.hexes[id].mat) G.hexes[id].mat.emissiveIntensity = 0; });
+    ids.forEach(id => {
+      const h = G.hexes[id];
+      if(h.mat) h.mat.emissiveIntensity = 0;
+      if(h.token){ h.token.position.y = TOP_Y + .035; h.token.rotation.y = Math.PI / 2; }
+    });
   });
 }
 
@@ -5168,6 +5179,7 @@ function addFlag(g, p, h){
   const flag2 = flag.clone();
   flag2.rotation.y = Math.PI / 2;
   g.add(pole, flag, flag2);
+  AMB.flags.push({g, a: flag, b: flag2, ph: Math.random() * 6.28});
 }
 
 // 壁・屋根・軒・窓・扉・煙突をそろえた小屋
@@ -5188,6 +5200,7 @@ function addSettlementMesh(v, p, type){
   g.position.set(v.x, TOP_Y, v.z);
   boardGroup.add(g);
   v.mesh = g;
+  ambChimney(g, .12, .50, -.07);
   sfx('build');
   buildDust(v.x, TOP_Y, v.z, .9);
   spawnIn(g, TOP_Y);
@@ -5229,6 +5242,7 @@ function replaceSettlementMesh(v, p){
   g.position.set(v.x, TOP_Y, v.z);
   boardGroup.add(g);
   v.mesh = g;
+  ambChimney(g, -.06, .42, 0);
   sfx('build');
   buildDust(v.x, TOP_Y, v.z, 1.15);
   spawnIn(g, TOP_Y);
@@ -5772,7 +5786,7 @@ function panBy(ax, ay, bx, by){
   applyCamera();
 }
 function onMove(e){
-  if(!drag) return;
+  if(!drag){ if(!e.touches) hoverPick(e); return; }
   if(e.touches && e.touches.length === 2 && drag.pinch){
     const d = pinchDist(e);
     const m = touchMid(e);
@@ -5884,11 +5898,16 @@ function pickOnce(d){
 }
 function tryPick(cx, cy){
   if(!pickables.length || G.busy) return;
+  const o = nearestPickable(cx, cy);
+  if(o) pickOnce(o.userData);
+}
+// 指やカーソルの下の印。直接当たらなければ、画面上でいちばん近い候補
+function nearestPickable(cx, cy){
   pointer.x = (cx / window.innerWidth) * 2 - 1;
   pointer.y = -(cy / window.innerHeight) * 2 + 1;
   raycaster.setFromCamera(pointer, camera);
   const hit = raycaster.intersectObjects(pickables, false)[0];
-  if(hit){ pickOnce(hit.object.userData); return; }
+  if(hit) return hit.object;
 
   let best = null, bestD = TAP_MAX();
   for(const o of pickables){
@@ -5905,7 +5924,20 @@ function tryPick(cx, cy){
     }
     if(d < bestD){ bestD = d; best = o; }
   }
-  if(best) pickOnce(best.userData);
+  return best;
+}
+// マウスを載せた印は、矢印キーで選んだときと同じく白く大きくする（どこに置かれるかが先に分かる）
+let hoverAt = 0;
+function hoverPick(e){
+  if(!pickables.length || G.busy || ghost()) return;
+  const now = performance.now();
+  if(now - hoverAt < 40) return;
+  hoverAt = now;
+  const r = renderer.domElement.getBoundingClientRect();
+  if(e.clientX < r.left || e.clientY < r.top || e.clientX > r.right || e.clientY > r.bottom) return;
+  if(e.target !== renderer.domElement) return;       // パネルやボタンの上では変えない
+  const o = nearestPickable(e.clientX, e.clientY);
+  if(o !== KB.mark) kbSetMark(o);
 }
 
 async function handlePick(d){
@@ -5979,6 +6011,122 @@ async function handlePick(d){
 }
 
 let prevT = 0;
+/* --- 環境の演出 ---------------------------------------------
+   旗のはためき・煙突の煙・カモメ。見た目だけなので Math.random を使ってよい
+   （進行には関わらない。ネット対戦でも端末ごとに違ってかまわない）。
+   動きを減らす設定（prefers-reduced-motion）では止める                 */
+const AMB = {flags: [], chims: [], puffs: [], gulls: [], tick: 0, still: false};
+try{ AMB.still = matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(e){}
+// 盤から外れた建物（作り直し・都市への発展）を見分ける
+const onBoard = g => !!g.parent;
+function ambChimney(g, x, y, z){
+  AMB.chims.push({g, x, y, z, next: performance.now() + 400 + Math.random() * 3000});
+}
+function makePuffTexture(){
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const x = c.getContext('2d');
+  const gr = x.createRadialGradient(32, 32, 2, 32, 32, 30);
+  gr.addColorStop(0, 'rgba(255,255,255,.95)');
+  gr.addColorStop(.55, 'rgba(240,240,236,.55)');
+  gr.addColorStop(1, 'rgba(230,230,226,0)');
+  x.fillStyle = gr;
+  x.fillRect(0, 0, 64, 64);
+  return new THREE.CanvasTexture(c);
+}
+function initAmbient(){
+  const tex = makePuffTexture();
+  // 煙の粒は使い回す（作っては捨てない）
+  for(let i = 0; i < 40; i++){
+    const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, opacity: 0, depthWrite: false, color: 0xf2efe8}));
+    sp.visible = false;
+    sp.renderOrder = 5;
+    scene.add(sp);
+    AMB.puffs.push({sp, life: 0, dur: 1});
+  }
+  // カモメ：胴と2枚の翼。盤の上を大きく回る
+  const white = new THREE.MeshLambertMaterial({color: 0xf7f7f2});
+  const tip = new THREE.MeshLambertMaterial({color: 0x4a4f55});
+  const body = new THREE.BoxGeometry(.26, .06, .07);
+  const wing = new THREE.BoxGeometry(.05, .012, .30);
+  const wtip = new THREE.BoxGeometry(.05, .012, .08);
+  for(let i = 0; i < 3; i++){
+    const g = new THREE.Group();
+    g.add(new THREE.Mesh(body, white));
+    const wings = [-1, 1].map(sd => {
+      const pivot = new THREE.Group();
+      const w = new THREE.Mesh(wing, white); w.position.z = sd * .15;
+      const t2 = new THREE.Mesh(wtip, tip); t2.position.z = sd * .33;
+      pivot.add(w, t2);
+      g.add(pivot);
+      return {pivot, sd};
+    });
+    g.traverse(o => { o.castShadow = true; });
+    scene.add(g);
+    g.scale.setScalar(.62);
+    AMB.gulls.push({g, wings, r: 5.2 + i * 1.1 + Math.random() * .6, h: 2.7 + i * .35, sp: (.10 + Math.random() * .05) * (i % 2 ? -1 : 1),
+                    a: Math.random() * 6.28, ph: Math.random() * 6.28, cx: 0, cz: 0});
+  }
+}
+function ambientStep(t, dt){
+  if(AMB.still) return;
+  // 盤から外れた物を時々掃除する
+  if(++AMB.tick % 90 === 0){
+    AMB.flags = AMB.flags.filter(f => onBoard(f.g));
+    AMB.chims = AMB.chims.filter(c => onBoard(c.g));
+  }
+  // 旗：付け根を軸に小さく揺らす
+  for(const f of AMB.flags){
+    const w = Math.sin(t / 260 + f.ph) * .28 + Math.sin(t / 97 + f.ph * 2) * .06;
+    f.a.rotation.y = w;
+    f.b.rotation.y = Math.PI / 2 + w;
+  }
+  // 煙突の煙：ときどき1粒ずつ上げる。風で少し流す
+  const now = performance.now();
+  for(const c of AMB.chims){
+    if(now < c.next || !onBoard(c.g)) continue;
+    c.next = now + 1800 + Math.random() * 2600;
+    const p = AMB.puffs.find(q => q.life <= 0);
+    if(!p) break;
+    const v = new THREE.Vector3(c.x, c.y, c.z);
+    c.g.localToWorld(v);
+    p.x = v.x; p.y = v.y; p.z = v.z;
+    // 寿命は実時間で測る。描画の遅い端末で粒が溜まり続けないように
+    p.t0 = now; p.dur = 2600 + Math.random() * 1200; p.life = 1;
+    p.sp.visible = true;
+  }
+  for(const p of AMB.puffs){
+    if(p.life <= 0) continue;
+    const k = (now - p.t0) / p.dur;
+    if(k >= 1){ p.life = 0; p.sp.visible = false; p.sp.material.opacity = 0; continue; }
+    p.sp.position.set(p.x + k * .35, p.y + k * .75, p.z - k * .12);
+    const sc = .16 + k * .42;
+    p.sp.scale.set(sc, sc, sc);
+    p.sp.material.opacity = Math.min(1, k * 5) * (1 - k) * .9;
+  }
+  // カモメ：盤の中心のまわりを回りながら、ゆっくり羽ばたく
+  if(AMB.gulls.length && G && G.hexes){
+    if(!AMB.center || AMB.tick % 90 === 1) AMB.center = boardCenter();
+    const c = AMB.center;
+    for(const b of AMB.gulls){
+      b.cx += (c.x - b.cx) * Math.min(1, dt * .5);
+      b.cz += (c.z - b.cz) * Math.min(1, dt * .5);
+      b.a += b.sp * dt;
+      const x = b.cx + Math.cos(b.a) * b.r, z = b.cz + Math.sin(b.a) * b.r * .8;
+      const y = b.h + Math.sin(t / 1700 + b.ph) * .25;
+      b.g.position.set(x, y, z);
+      // 進む向きへ頭を向け、旋回の内側へ少し傾ける
+      const vx = -Math.sin(b.a) * b.r * b.sp, vz = Math.cos(b.a) * b.r * .8 * b.sp;
+      b.g.rotation.order = 'YXZ';
+      b.g.rotation.y = -Math.atan2(vz, vx);
+      b.g.rotation.x = -.28 * Math.sign(b.sp);
+      const flap = Math.sin(t / 150 + b.ph);
+      const glide = (Math.sin(t / 2300 + b.ph) + 1) / 2;       // 羽ばたきと滑空を交互に
+      b.wings.forEach(w => { w.pivot.rotation.x = w.sd * (glide > .55 ? .08 : flap * .55); });
+    }
+  }
+}
+
 function animate(t){
   requestAnimationFrame(animate);
   t = t || 0;
@@ -6007,6 +6155,7 @@ function animate(t){
     b.obj.position.y = b.y + Math.sin(t / 880 + b.ph) * .05;
     b.obj.rotation.z = Math.sin(t / 1150 + b.ph) * .07;
   }
+  ambientStep(t, Math.min(dt2, .05));
   renderer.render(scene, camera);
 }
 
@@ -11368,6 +11517,7 @@ function addOnePortMesh(p, pi){
 
 initThree();
 initMaterials();
+initAmbient();
 
 const el = renderer.domElement;
 /* スマホではタッチの直後にブラウザが同じ位置へマウス操作を送ってくる。
