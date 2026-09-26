@@ -5113,7 +5113,7 @@ function makeCactusGeo(){
 /* 割れた石塊。丸い塊を不規則な平面で何度も切り落とし、割れ面を作る。
    上をすぼめて傾け、柱や板のような整った形にしない                      */
 function rockChunk(w, h, d, cuts, taper){
-  const g = weld(new THREE.IcosahedronGeometry(.5, 3));
+  const g = weld(new THREE.IcosahedronGeometry(.5, 2));
   const p = g.attributes.position, v = new THREE.Vector3();
   const planes = [];
   for(let i = 0; i < (cuts || 9); i++){
@@ -5136,19 +5136,19 @@ function makeOutcropGeo(){
   const parts = [];
   const col = () => ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)];
   // 低く横に広い岩塊を寄せて積む（縦長に立てると墓石や柱に見える）
-  parts.push(part(rockChunk(.34, .2, .28, 11, .3), col(), [-.02, -.03, -.04], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)]));
-  parts.push(part(rockChunk(.26, .16, .22, 10, .25), col(), [rr(-.2, -.14), -.02, rr(-.02, .06)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
-  parts.push(part(rockChunk(.24, .14, .2, 10, .25), col(), [rr(.12, .18), -.02, rr(-.06, .02)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
+  parts.push(part(rockChunk(.28, .27, .24, 11, .38), col(), [-.01, -.03, -.02], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)]));
+  parts.push(part(rockChunk(.21, .19, .18, 10, .3), col(), [rr(-.14, -.1), -.02, rr(-.02, .05)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
+  parts.push(part(rockChunk(.19, .17, .17, 10, .3), col(), [rr(.09, .13), -.02, rr(-.05, .02)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
   // 上に載って少し傾いた平たい岩
-  parts.push(part(rockChunk(.22, .08, .16, 9, .1), col(), [rr(-.04, .06), .13, rr(-.04, .02)], [rr(-.2, .2), rr(0, 6.28), rr(-.25, .25)]));
+  parts.push(part(rockChunk(.17, .07, .13, 9, .1), col(), [rr(-.03, .04), .19, rr(-.03, .02)], [rr(-.2, .2), rr(0, 6.28), rr(-.25, .25)]));
   // 手前の岩塊とこぼれた小石
   for(let i = 0; i < 5; i++){
-    const s = rr(.08, .13), a = rr(-1.2, 1.2) + Math.PI / 2, d = rr(.13, .21);
+    const s = rr(.06, .1), a = rr(-1.2, 1.2) + Math.PI / 2, d = rr(.09, .14);
     parts.push(part(rockChunk(s * rr(1.1, 1.5), s * rr(.7, 1), s * rr(.9, 1.2), 8, .2), col(),
                     [Math.cos(a) * d, -.01, Math.sin(a) * d], [rr(-.2, .2), rr(0, 6.28), rr(-.2, .2)]));
   }
   for(let i = 0; i < 9; i++){
-    const s = rr(.025, .05), a = rr(0, 6.28), d = rr(.18, .3);
+    const s = rr(.02, .04), a = rr(0, 6.28), d = rr(.12, .19);
     parts.push(part(rockChunk(s * 1.3, s * .8, s, 6, .1), col(),
                     [Math.cos(a) * d, -.005, Math.sin(a) * d], [rr(0, .6), rr(0, 6.28), rr(0, .6)]));
   }
@@ -5233,6 +5233,7 @@ function initProps(){
   M.leaf = new THREE.MeshStandardMaterial({map: leafTex, alphaTest: .5, side: THREE.DoubleSide,
                                           vertexColors: true, roughness: .8});
   M.leafDepth = new THREE.MeshDepthMaterial({depthPacking: THREE.RGBADepthPacking, map: leafTex, alphaTest: .5});
+  GEO.boulder   = mergeParts([part(rockChunk(1, .75, .85, 9, .25), 0xffffff)]);
   GEO.outcropA  = makeOutcropGeo();
   GEO.outcropB  = makeOutcropGeo();
   GEO.outcropC  = makeOutcropGeo();
@@ -5354,6 +5355,14 @@ function rowSpots(h, dir, gapRow, gapAlong, opt){
   return out;
 }
 
+// 半径 r の足もと全体がタイルの内側（枠と街道の手前）に収まるか
+function fits(h, p, r, lim){
+  const dx = p[0] - h.x, dz = p[1] - h.z;
+  for(let k = 0; k < 6; k++)
+    if(dx * HEX_NORM[k][0] + dz * HEX_NORM[k][1] + r > HEX_IN * (lim || .9)) return false;
+  return true;
+}
+
 function tileDecor(h, bins){
   const rnd = (a, b) => a + Math.random() * (b - a);
   const ang = () => Math.random() * 6.2832;
@@ -5365,68 +5374,81 @@ function tileDecor(h, bins){
   const tuft = (p, s, hex) => pushInst(B(bins, 'tuft'), p[0], TOP_Y, p[1], s, s, s, ang(), varyColor(hex, .03, .1, .12));
 
   if(h.type === 'forest'){
-    // 針葉樹を主に、広葉樹を混ぜる。伐った丸太の山で「木材」を示す
-    // 葉の茂った広葉樹を3種混ぜ、背丈をばらつかせる
+    // 葉の茂った広葉樹を3種混ぜ、背丈をばらつかせる。伐った丸太の山で「木材」を示す。
     // 数字札に樹冠がかぶらないよう、札のまわりは広めに空ける
-    spots(h, 22, {sep:.17, rMin:.62}).forEach(p => {
+    const tree = (p, sc) => {
       const r = Math.random();
       const k = r < .4 ? 'broadleaf' : r < .75 ? 'broadleaf2' : 'broadleaf3';
-      const sc = rnd(.75, 1.1), ry = ang(), c = varyColor(0xeef2ea, .03, .08, .16);
+      const ry = ang(), c = varyColor(0xeef2ea, .03, .08, .16);
       put(k, p, sc, ry, c);
-      if(GEO[k + 'Leaf']) put(k + 'Leaf', p, sc, ry, c);
-    });
-    spots(h, 1, {rMin:.55, corner:.45}).forEach(p => put('logs', p, rnd(.9, 1.1)));
-    spots(h, 3, {sep:.2}).forEach(p => put('stump', p, rnd(.8, 1.2)));
-    spots(h, 12, {sep:.1}).forEach(p => put('fern', p, rnd(.7, 1.1), undefined, varyColor(0xe4ecd8, .03, .1, .14)));
-    spots(h, 8, {sep:.12}).forEach(p => bush(p[0], p[1], rnd(.07, .12), 1.5, .9, 0x2f5a26));
+      put(k + 'Leaf', p, sc, ry, c);
+    };
+    spots(h, 34, {sep:.13, rMin:.62}).forEach(p => tree(p, rnd(.7, 1.1)));
+    // 大きな木の間を埋める若木
+    spots(h, 12, {sep:.1, rMin:.55}).forEach(p => tree(p, rnd(.4, .55)));
+    spots(h, 6, {rMin:.55, corner:.45}).filter(p => fits(h, p, .14)).slice(0, 1).forEach(p => put('logs', p, rnd(.9, 1.1)));
+    spots(h, 4, {sep:.18}).forEach(p => put('stump', p, rnd(.8, 1.2)));
+    spots(h, 26, {sep:.07}).forEach(p => put('fern', p, rnd(.7, 1.1), undefined, varyColor(0xe4ecd8, .03, .1, .14)));
+    spots(h, 16, {sep:.09}).forEach(p => bush(p[0], p[1], rnd(.07, .12), 1.5, .9, 0x2f5a26));
   } else if(h.type === 'fields'){
     // 麦は畝に沿って株を並べ、刈った干し草ロールを添える
     const dir = ang();
-    rowSpots(h, dir, .105, .08, {rMin:.44, corner:.34, shrink:.88}).forEach(p =>
+    rowSpots(h, dir, .082, .062, {rMin:.43, corner:.33, shrink:.9}).forEach(p =>
       put('wheatClump', p, rnd(.95, 1.25), undefined, tint(.1)));
-    spots(h, 3, {sep:.26, rMin:.5, corner:.42}).forEach(p => put('hay', p, rnd(.9, 1.1), dir + rnd(-.3, .3)));
+    spots(h, 4, {sep:.24, rMin:.5, corner:.42}).forEach(p => put('hay', p, rnd(.9, 1.1), dir + rnd(-.3, .3)));
   } else if(h.type === 'pasture'){
     // 羊・柵・草の株・花
-    spots(h, 7, {sep:.24}).forEach(p => put('sheep2', p, rnd(.8, 1.05), undefined, tint(.06)));
-    spots(h, 1, {rMin:.6, corner:.45, shrink:.78}).forEach(p => put('fence', p, 1));
-    spots(h, 16, {sep:.1}).forEach(p => tuft(p, rnd(.7, 1.1), 0x5f9a34));
-    spots(h, 5, {sep:.16}).forEach(p => bush(p[0], p[1], rnd(.08, .14), 1.6, .9, 0x3f7a2a));
-    spots(h, 18, {sep:.06}).forEach(p => {
+    spots(h, 11, {sep:.2}).forEach(p => put('sheep2', p, rnd(.75, 1.05), undefined, tint(.06)));
+    spots(h, 6, {sep:.5, rMin:.6, corner:.45, shrink:.78}).filter(p => fits(h, p, .26)).slice(0, 2).forEach(p => put('fence', p, 1));
+    spots(h, 36, {sep:.07}).forEach(p => tuft(p, rnd(.6, 1.1), 0x5f9a34));
+    spots(h, 9, {sep:.13}).forEach(p => bush(p[0], p[1], rnd(.07, .13), 1.6, .9, 0x3f7a2a));
+    spots(h, 44, {sep:.04}).forEach(p => {
       const sz = rnd(.018, .026);
       pushInst(bins.face, p[0], TOP_Y + .02, p[1], sz, sz * .7, sz, 0,
                new THREE.Color(Math.random() < .5 ? 0xfaf6e8 : 0xf0cc4a));
     });
   } else if(h.type === 'hills'){
     // 粘土の採掘場：窯・積んだレンガ・掘り跡・粘土の山
-    spots(h, 1, {rMin:.52, corner:.46}).forEach(p => put('kiln', p, rnd(1, 1.15)));
-    spots(h, 6, {sep:.24, rMin:.48}).forEach(p => put('brickPile', p, rnd(.8, 1)));
-    spots(h, 7, {sep:.12}).forEach(p => put('brickStack', p, rnd(.85, 1.15)));
-    spots(h, 2, {sep:.32}).forEach(p =>
+    spots(h, 8, {rMin:.58, corner:.42, shrink:.95}).filter(p => fits(h, p, .19, .95)).slice(0, 1).forEach(p => put('kiln', p, rnd(1, 1.15)));
+    // 札のまわりに寄せず、タイル全体に散らす
+    spots(h, 14, {sep:.2, rMin:.56, corner:.34, shrink:.95}).filter(p => fits(h, p, .14, .95)).forEach(p => put('brickPile', p, rnd(.75, 1)));
+    spots(h, 16, {sep:.09, rMin:.5, corner:.32, shrink:.93}).forEach(p => put('brickStack', p, rnd(.85, 1.15)));
+    spots(h, 3, {sep:.28}).forEach(p =>
       pushInst(B(bins, 'pit'), p[0], TOP_Y + .004, p[1], rnd(.26, .36), 1, rnd(.2, .28), ang(), varyColor(0x6a2f1a, .02, .08, .08)));
-    spots(h, 4, {sep:.16}).forEach(p => bush(p[0], p[1], rnd(.1, .16), 1.8, .6, 0xa65634));
-    spots(h, 12, {sep:.1}).forEach(p => tuft(p, rnd(.6, .95), 0xa39a52));
+    spots(h, 6, {sep:.14}).forEach(p => bush(p[0], p[1], rnd(.1, .16), 1.8, .6, 0xa65634));
+    spots(h, 24, {sep:.07}).forEach(p => tuft(p, rnd(.6, .95), 0xa39a52));
   } else if(h.type === 'mountains'){
     // 岩だらけの地形：割れた石塊の露頭を数字札のまわりに寄せ、小石を散らす
-    spots(h, 6, {sep:.3, rMin:.52, corner:.4, shrink:.86}).forEach((p, i) => {
-      // 背の高い柱岩が奥に来るよう、札の外側へ向ける
+    // 岩の山は半径 .22 ほど。背を高くして量感を出し、枠からはみ出さない所だけに置く
+    spots(h, 16, {sep:.2, rMin:.46, corner:.3, shrink:.95}).forEach((p, i) => {
+      const sc = rnd(.9, 1.2);
+      if(!fits(h, p, .22 * sc, .95)) return;
       const out = Math.atan2(p[1] - h.z, p[0] - h.x);
-      put(['outcropA', 'outcropB', 'outcropC'][i % 3], p, rnd(.8, 1.15), -out - Math.PI / 2 + rnd(-.5, .5), tint(.1));
+      put(['outcropA', 'outcropB', 'outcropC'][i % 3], p, sc, -out - Math.PI / 2 + rnd(-.5, .5), tint(.1));
+    });
+    // 外側には大きめの岩塊を1つずつ
+    spots(h, 20, {sep:.13, rMin:.55, corner:.3, shrink:.95}).forEach(p => {
+      const sz = rnd(.09, .16);
+      if(!fits(h, p, sz * .55, .95)) return;
+      pushInst(B(bins, 'boulder'), p[0], TOP_Y - .01, p[1], sz, sz * rnd(.8, 1.1), sz, ang(),
+               new THREE.Color(ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)]).multiplyScalar(rnd(1, 1.2)));
     });
     // 坑口は山の手前の麓に、手前を向けて置く
-    spots(h, 8, {rMin:.5, corner:.45}).filter(p => p[1] > h.z + .1).slice(0, 1).forEach(p =>
+    spots(h, 12, {rMin:.5, corner:.45}).filter(p => p[1] > h.z + .1 && fits(h, p, .24)).slice(0, 1).forEach(p =>
       put('mine', p, rnd(.95, 1.1), -Math.atan2(p[1] - h.z, p[0] - h.x)));
-    spots(h, 16, {sep:.09}).forEach(p => {
-      const sz = rnd(.04, .09);
+    spots(h, 30, {sep:.06, shrink:.92}).forEach(p => {
+      const sz = rnd(.03, .07);
+      if(!fits(h, p, sz, .95)) return;
       pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.5, sz * 1.1, sz * 1.4, ang(), varyColor(0x8c7c70, .02, .08, .14));
     });
-    spots(h, 6, {sep:.12}).forEach(p => tuft(p, rnd(.5, .8), 0x8a8a52));
+    spots(h, 14, {sep:.08}).forEach(p => tuft(p, rnd(.5, .8), 0x8a8a52));
   } else if(h.type === 'desert'){
     // 砂丘・サボテン・枯れ草
-    spots(h, 4, {sep:.35, rMin:.5}).forEach(p =>
+    spots(h, 6, {sep:.28, rMin:.5}).forEach(p =>
       pushInst(bins.bush, p[0], TOP_Y - .01, p[1], rnd(.4, .6), rnd(.07, .11), rnd(.28, .4), ang(), varyColor(0xe6d29e, .02, .06, .06)));
-    spots(h, 3, {sep:.3}).forEach(p => put('cactus', p, rnd(.85, 1.2), undefined, tint(.08)));
-    spots(h, 8, {sep:.12}).forEach(p => tuft(p, rnd(.5, .8), 0x9c8a55));
-    spots(h, 12, {sep:.11}).forEach(p => {
+    spots(h, 6, {sep:.22}).forEach(p => put('cactus', p, rnd(.7, 1.2), undefined, tint(.08)));
+    spots(h, 18, {sep:.08}).forEach(p => tuft(p, rnd(.5, .8), 0x9c8a55));
+    spots(h, 26, {sep:.07}).forEach(p => {
       const sz = rnd(.04, .09);
       pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.6, sz, sz * 1.5, ang(), varyColor(0xb8a375, .03, .10, .12));
     });
@@ -5551,10 +5573,10 @@ function addHexVisual(h, bins){
 // 装飾は形ごとに1つの InstancedMesh にまとめる
 // 地面に接する低い物だけ影を受ける（高い物まで受けると影が濁る）
 const BIN_GEO = {face: 'head'};
-const BIN_FLAT = new Set(['outcropA', 'outcropB', 'outcropC']);
+const BIN_FLAT = new Set(['outcropA', 'outcropB', 'outcropC', 'boulder']);
 const BIN_LEAF = new Set(['broadleafLeaf', 'broadleaf2Leaf', 'broadleaf3Leaf']);
 const BIN_RECV = new Set(['bush', 'rock', 'pit', 'mine', 'kiln', 'brickPile', 'brickStack', 'stump',
-                          'outcropA', 'outcropB', 'outcropC']);
+                          'outcropA', 'outcropB', 'outcropC', 'boulder']);
 function addAllInstanced(bins){
   Object.keys(bins).forEach(k => {
     const im = addInstanced(GEO[BIN_GEO[k] || k], bins[k], BIN_RECV.has(k),
