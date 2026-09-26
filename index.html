@@ -4316,17 +4316,25 @@ function initThree(){
   renderer = new THREE.WebGLRenderer({antialias:true});
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // 映画の階調に寄せる。明部が白く飛ばず、色がべたっと張りつかない
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 1.0;
   document.getElementById('canvas-wrap').appendChild(renderer.domElement);
+  scene.environment = makeSkyEnvironment();
 
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
 
   // 空と海からの回り込みを想定した環境光。影の中も沈ませない
-  scene.add(new THREE.HemisphereLight(0xcfe9ff, 0x46593e, 0.36));
-  const sun = new THREE.DirectionalLight(0xfff3d8, 1.36);
+  // 空の映り込み（scene.environment）が回り込みの大半を担うので、半球光は控えめにする
+  scene.add(new THREE.HemisphereLight(0xcfe9ff, 0x46593e, 0.26));
+  const sun = new THREE.DirectionalLight(0xfff0d0, 1.62);
   sun.position.set(9, 15, 7);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(1024, 1024);       // 負荷を上げないため1024で据え置き
+  // 影の輪郭が階段状に見えないよう、画面の広い端末だけ解像度を上げる
+  const big = Math.min(window.innerWidth, window.innerHeight) >= 700;
+  sun.shadow.mapSize.set(big ? 2048 : 1024, big ? 2048 : 1024);
+  sun.shadow.radius = 3;
   const d = 12;
   sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
   sun.shadow.camera.top = d; sun.shadow.camera.bottom = -d;
@@ -4414,11 +4422,50 @@ function makeRippleTexture(){
   return t;
 }
 
+/* 空の映り込み。空・水平線・太陽だけの小さな場面を焼いて環境光にする。
+   海面のきらめきと、物の上面に空色が回り込む柔らかさがここから出る */
+function makeSkyEnvironment(){
+  const env = new THREE.Scene();
+  const g = new THREE.SphereGeometry(50, 32, 16), p = g.attributes.position, col = [];
+  const zen = new THREE.Color(0x5f9fd0), hor = new THREE.Color(0xd8ecf2), low = new THREE.Color(0x1e4b5c);
+  for(let i = 0; i < p.count; i++){
+    const y = p.getY(i) / 50, c = new THREE.Color();
+    if(y >= 0) c.copy(hor).lerp(zen, Math.pow(y, .6));
+    else c.copy(hor).lerp(low, Math.min(1, -y * 4));
+    col.push(c.r * .32, c.g * .32, c.b * .32);
+  }
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  env.add(new THREE.Mesh(g, new THREE.MeshBasicMaterial({vertexColors: true, side: THREE.BackSide})));
+  // 太陽。明るさを 1 より大きくして、海面に強い照り返しを作る
+  const sunDisc = new THREE.Mesh(new THREE.SphereGeometry(3.2, 16, 8),
+    new THREE.MeshBasicMaterial({color: new THREE.Color(14, 12.5, 10)}));
+  sunDisc.position.set(9, 15, 7).normalize().multiplyScalar(44);
+  env.add(sunDisc);
+  const pm = new THREE.PMREMGenerator(renderer);
+  const tex = pm.fromScene(env, .02).texture;
+  pm.dispose();
+  g.dispose();
+  return tex;
+}
+
 function buildSea(){
-  const wg = new THREE.PlaneGeometry(190, 190, 1, 1);
+  /* 海の色は頂点色で持たせる。絵（map）の拡大を使うと、さざ波の法線の
+     細かい繰り返しを同時に持てない（1枚の材質は拡大率を1つしか持てない） */
+  const N = 150, wg = new THREE.PlaneGeometry(190, 190, N, N);
   wg.rotateX(-Math.PI / 2);
+  const sc = makeSeaTexture().image, sd = sc.getContext('2d').getImageData(0, 0, 512, 512).data;
+  const SPAN = 190 / 46, wp = wg.attributes.position, col = [];
+  for(let i = 0; i < wp.count; i++){
+    const u = clamp01((wp.getX(i) / 190 + .5) * SPAN - (SPAN - 1) / 2);
+    const v = clamp01((-wp.getZ(i) / 190 + .5) * SPAN - (SPAN - 1) / 2);
+    const o = (Math.min(511, Math.floor((1 - v) * 512)) * 512 + Math.min(511, Math.floor(u * 512))) * 4;
+    col.push(sd[o] / 255 * .9, sd[o + 1] / 255 * .9, sd[o + 2] / 255 * .9);
+  }
+  wg.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  const nt = canvasTex(waterNormalCanvas(), 22, 22);
   water = new THREE.Mesh(wg, new THREE.MeshStandardMaterial({
-    map: makeSeaTexture(), roughness: .34, metalness: .18
+    vertexColors: true, roughness: .3, metalness: .05,
+    normalMap: nt, normalScale: new THREE.Vector2(.18, .18), envMapIntensity: .8
   }));
   water.position.y = -0.35;
   water.receiveShadow = false;   // 海面に島の影は落とさない
@@ -4497,6 +4544,258 @@ function makePortTexture(type){
   return t;
 }
 
+/* --- 質感（地面・崖・水面・建物） ----------------------------
+   単色の面と角ばった形は積み木（ボクセル）に見える。
+   まだら・ざらつき・凹凸をその場で描いた絵を貼り、実物の地面に寄せる。
+   外部の画像は読まない                                              */
+// 周期 P の格子の値ノイズ。画像の幅を P 升に合わせると端どうしがつながる
+function makeNoise(P){
+  const r = new Float32Array(P * P);
+  for(let i = 0; i < r.length; i++) r[i] = Math.random();
+  const g = (a, b) => r[(((a % P) + P) % P) + (((b % P) + P) % P) * P];
+  const n = (x, y) => {
+    const xi = Math.floor(x), yi = Math.floor(y);
+    let fx = x - xi, fy = y - yi;
+    fx = fx * fx * (3 - 2 * fx); fy = fy * fy * (3 - 2 * fy);
+    const a = g(xi, yi), b = g(xi + 1, yi), c = g(xi, yi + 1), d = g(xi + 1, yi + 1);
+    return a + (b - a) * fx + (c - a) * fy + (a - b - c + d) * fx * fy;
+  };
+  n.P = P;
+  return n;
+}
+// u, v は 0〜1。オクターブを重ねてもそれぞれ周期がそろうので継ぎ目が出ない
+function fbm(n, u, v, oct){
+  let s = 0, amp = .5, f = 1, tot = 0;
+  for(let i = 0; i < oct; i++){ s += n(u * n.P * f, v * n.P * f) * amp; tot += amp; amp *= .5; f *= 2; }
+  return s / tot;
+}
+const clamp01 = t => t < 0 ? 0 : t > 1 ? 1 : t;
+// fbm は .5 付近に寄るので、コントラストを戻してから使う
+const spread = (t, k) => clamp01((t - .5) * (k || 2.6) + .5);
+const rgbOf = hex => [hex >> 16 & 255, hex >> 8 & 255, hex & 255];
+const mixRGB = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+
+function paintCanvas(size, shade){
+  const c = document.createElement('canvas');
+  c.width = c.height = size;
+  const x = c.getContext('2d'), img = x.createImageData(size, size), d = img.data;
+  for(let j = 0; j < size; j++){
+    for(let i = 0; i < size; i++){
+      const o = (j * size + i) * 4, col = shade(i / size, j / size);
+      d[o] = col[0]; d[o + 1] = col[1]; d[o + 2] = col[2]; d[o + 3] = 255;
+    }
+  }
+  x.putImageData(img, 0, 0);
+  return c;
+}
+// 草・針葉・石粒などの細かい筆致を散らす
+function strokes(c, n, colors, len, wid){
+  const x = c.getContext('2d'), S = c.width;
+  x.lineCap = 'round';
+  for(let i = 0; i < n; i++){
+    const px = Math.random() * S, py = Math.random() * S;
+    const a = -Math.PI / 2 + (Math.random() - .5) * 1.4, l = len * (.5 + Math.random());
+    x.strokeStyle = colors[i % colors.length];
+    x.lineWidth = wid * (.6 + Math.random() * .8);
+    x.beginPath(); x.moveTo(px, py); x.lineTo(px + Math.cos(a) * l, py + Math.sin(a) * l); x.stroke();
+  }
+}
+function dots(c, n, colors, r){
+  const x = c.getContext('2d'), S = c.width;
+  for(let i = 0; i < n; i++){
+    x.fillStyle = colors[i % colors.length];
+    x.beginPath();
+    x.arc(Math.random() * S, Math.random() * S, r * (.4 + Math.random() * .9), 0, 6.284);
+    x.fill();
+  }
+}
+function canvasTex(c, rx, ry){
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 8;
+  if(rx){ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry || 1); }
+  return t;
+}
+
+// 地形の上面。タイル1枚に1枚の絵を貼る（円柱の上面は円で UV が張られる）
+function groundCanvas(kind){
+  const S = 512;
+  const big = makeNoise(5), mid = makeNoise(22), fine = makeNoise(90);
+  const base = (lo, hi, u, v, k) => {
+    const t = spread(fbm(big, u, v, 4), k);
+    const g = .86 + fine(u * 90, v * 90) * .16 + (fbm(mid, u, v, 2) - .5) * .22;
+    const c = mixRGB(rgbOf(lo), rgbOf(hi), t);
+    return [c[0] * g, c[1] * g, c[2] * g];
+  };
+  let c;
+  if(kind === 'pasture'){
+    c = paintCanvas(S, (u, v) => base(0x557f32, 0x8bb354, u, v));
+    strokes(c, 2600, ['rgba(52,84,30,.55)', 'rgba(150,190,96,.45)', 'rgba(98,140,58,.5)'], 7, 1.4);
+    dots(c, 70, ['rgba(250,246,220,.85)', 'rgba(236,208,86,.8)'], 1.8);
+  } else if(kind === 'forest'){
+    c = paintCanvas(S, (u, v) => base(0x2f4526, 0x5a6a35, u, v));
+    strokes(c, 2200, ['rgba(92,70,40,.45)', 'rgba(36,58,30,.55)', 'rgba(110,130,60,.35)'], 6, 1.2);
+  } else if(kind === 'fields'){
+    // 畝：うねる縞を入れる
+    const warp = makeNoise(4);
+    c = paintCanvas(S, (u, v) => {
+      const b = base(0xb38b3c, 0xdcbd66, u, v, 2);
+      const w = fbm(warp, u, v, 2) * 3;
+      const f = .86 + .14 * (.5 + .5 * Math.sin((u * .8 + v * .6) * 6.2832 * 26 + w));
+      return [b[0] * f, b[1] * f, b[2] * f];
+    });
+    strokes(c, 2400, ['rgba(120,88,34,.4)', 'rgba(240,214,130,.45)'], 6, 1.1);
+  } else if(kind === 'hills'){
+    // 赤土：ひびと、乾いた草の株
+    const crack = makeNoise(14);
+    c = paintCanvas(S, (u, v) => {
+      const b = base(0x86442a, 0xb96d45, u, v);
+      const k = Math.abs(fbm(crack, u, v, 3) - .5);
+      const f = k < .018 ? .72 : 1;
+      return [b[0] * f, b[1] * f, b[2] * f];
+    });
+    strokes(c, 700, ['rgba(128,120,58,.55)', 'rgba(96,92,44,.5)'], 6, 1.3);
+    dots(c, 260, ['rgba(70,40,26,.45)', 'rgba(214,160,120,.35)'], 2.2);
+  } else if(kind === 'mountains'){
+    // 岩肌：斜めの地層と、苔・がれ
+    const warp = makeNoise(6);
+    c = paintCanvas(S, (u, v) => {
+      const b = base(0x62686f, 0x9ba2a8, u, v, 2.2);
+      const s = .5 + .5 * Math.sin((v + u * .35) * 6.2832 * 11 + fbm(warp, u, v, 3) * 7);
+      const f = .84 + s * .2;
+      return [b[0] * f, b[1] * f, b[2] * f];
+    });
+    dots(c, 500, ['rgba(40,44,50,.4)', 'rgba(200,204,208,.45)', 'rgba(110,120,80,.35)'], 2.4);
+  } else if(kind === 'desert'){
+    // 砂丘の風紋
+    const warp = makeNoise(5);
+    c = paintCanvas(S, (u, v) => {
+      const b = base(0xc9ad76, 0xe7d4a3, u, v, 2);
+      const r = .5 + .5 * Math.sin((u + v * .4) * 6.2832 * 18 + fbm(warp, u, v, 3) * 9);
+      const f = .92 + r * .1;
+      return [b[0] * f, b[1] * f, b[2] * f];
+    });
+    dots(c, 300, ['rgba(140,110,70,.35)', 'rgba(255,248,226,.5)'], 1.6);
+  } else if(kind === 'gold'){
+    c = paintCanvas(S, (u, v) => base(0x6f5d40, 0x9c845a, u, v));
+    dots(c, 420, ['rgba(255,214,90,.85)', 'rgba(255,240,170,.7)'], 1.7);
+  } else if(kind === 'spice'){
+    c = paintCanvas(S, (u, v) => base(0x5f6e2c, 0x91a04a, u, v));
+    strokes(c, 2000, ['rgba(60,74,26,.5)', 'rgba(160,176,90,.4)'], 6, 1.2);
+  }
+  return c;
+}
+// 崖：横に走る地層。円柱の側面に巻くので、左右の端はつながる絵にする
+function cliffCanvas(){
+  const big = makeNoise(6), mid = makeNoise(24), fine = makeNoise(96);
+  return paintCanvas(256, (u, v) => {
+    const w = fbm(big, u, v, 3);
+    const band = .5 + .5 * Math.sin((v * 7 + w * 2.2) * 6.2832);
+    const t = spread(fbm(mid, u, v, 3), 2.2) * .6 + band * .4;
+    const c = mixRGB([58, 45, 34], [118, 96, 72], t);
+    const g = .82 + fine(u * 96, v * 96) * .26;
+    return [c[0] * g, c[1] * g, c[2] * g];
+  });
+}
+function sandCanvas(){
+  const mid = makeNoise(16), fine = makeNoise(128);
+  return paintCanvas(256, (u, v) => {
+    const c = mixRGB([196, 172, 126], [226, 208, 160], spread(fbm(mid, u, v, 3), 2));
+    const g = .88 + fine(u * 128, v * 128) * .2;
+    return [c[0] * g, c[1] * g, c[2] * g];
+  });
+}
+// 建物の壁（漆喰）と屋根（瓦の段）。持ち主の色に掛け合わせるので灰色で描く
+function plasterCanvas(){
+  const mid = makeNoise(10), fine = makeNoise(64);
+  return paintCanvas(128, (u, v) => {
+    const g = 205 + (fbm(mid, u, v, 3) - .5) * 60 + (fine(u * 64, v * 64) - .5) * 30;
+    return [g, g, g];
+  });
+}
+function roofCanvas(){
+  const fine = makeNoise(64);
+  return paintCanvas(128, (u, v) => {
+    // 棟と平行な段（u 方向の縞）と、段ごとにずらした継ぎ目
+    const row = Math.floor(u * 12);
+    const fu = u * 12 - row;
+    const fv = (v * 10 + (row % 2) * .5) % 1;
+    let g = 215 - fu * 55 + (fine(u * 64, v * 64) - .5) * 26;
+    if(fv < .06) g *= .78;
+    return [g, g, g];
+  });
+}
+// 水面のさざ波の法線。高さの場から差分で起こす
+function waterNormalCanvas(){
+  const n1 = makeNoise(8), n2 = makeNoise(32);
+  const S = 256, H = new Float32Array(S * S);
+  for(let j = 0; j < S; j++) for(let i = 0; i < S; i++)
+    H[j * S + i] = fbm(n1, i / S, j / S, 3) * .7 + fbm(n2, i / S, j / S, 2) * .3;
+  const at = (i, j) => H[((j + S) % S) * S + ((i + S) % S)];
+  return paintCanvas(S, (u, v) => {
+    const i = Math.round(u * S), j = Math.round(v * S);
+    const dx = (at(i + 1, j) - at(i - 1, j)) * 22, dy = (at(i, j + 1) - at(i, j - 1)) * 22;
+    const l = Math.hypot(dx, dy, 1);
+    return [(-dx / l * .5 + .5) * 255, (-dy / l * .5 + .5) * 255, (1 / l * .5 + .5) * 255];
+  });
+}
+
+/* --- 装飾の形 ------------------------------------------------
+   整った円錐や球はそのままだと作り物に見える。頂点を少しずつ揺らし、
+   根元を暗くして（接地の陰り）自然物に寄せる                          */
+// 同じ座標の頂点は同じだけ動かす（継ぎ目が割れない）
+function jitterAt(x, y, z, s){
+  const k = Math.sin(x * 127.1 + y * 311.7 + z * 74.7 + s * 17.3) * 43758.5453;
+  return k - Math.floor(k) - .5;
+}
+function roughen(geo, amt, opt){
+  opt = opt || {};
+  const p = geo.attributes.position;
+  geo.computeBoundingBox();
+  const y0 = geo.boundingBox.min.y;
+  for(let i = 0; i < p.count; i++){
+    const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+    const qx = Math.round(x * 1e3), qy = Math.round(y * 1e3), qz = Math.round(z * 1e3);
+    const keep = opt.keepBase && y - y0 < 1e-4;
+    p.setXYZ(i,
+      x + jitterAt(qx, qy, qz, 1) * amt,
+      keep ? y : y + jitterAt(qx, qy, qz, 2) * amt * (opt.ay === undefined ? 1 : opt.ay),
+      z + jitterAt(qx, qy, qz, 3) * amt);
+  }
+  geo.computeVertexNormals();
+  return geo;
+}
+// 同じ位置の頂点を1つにまとめる。法線が平均されて面の境目がなめらかになる
+function weld(geo){
+  const src = geo.index ? geo.toNonIndexed() : geo;
+  const p = src.attributes.position, map = new Map(), pos = [], idx = [];
+  for(let i = 0; i < p.count; i++){
+    const key = Math.round(p.getX(i) * 1e4) + ',' + Math.round(p.getY(i) * 1e4) + ',' + Math.round(p.getZ(i) * 1e4);
+    let k = map.get(key);
+    if(k === undefined){ k = pos.length / 3; map.set(key, k); pos.push(p.getX(i), p.getY(i), p.getZ(i)); }
+    idx.push(k);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(idx);
+  g.computeVertexNormals();
+  return g;
+}
+// 高さで明暗をつける頂点色。lo が根元、hi が先端。top 以上は snow 色にする
+function shadeByHeight(geo, lo, hi, snow){
+  const p = geo.attributes.position, col = [];
+  geo.computeBoundingBox();
+  const b = geo.boundingBox, h = (b.max.y - b.min.y) || 1;
+  for(let i = 0; i < p.count; i++){
+    const t = (p.getY(i) - b.min.y) / h;
+    let v = lo + (hi - lo) * Math.pow(t, .7);
+    if(snow && t > snow[0] + jitterAt(p.getX(i) * 1e3, 0, p.getZ(i) * 1e3, 5) * .12){
+      col.push(snow[1], snow[1] * .98, snow[1] * .95);
+    } else col.push(v, v, v);
+  }
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  return geo;
+}
+
 /* --- 共有マテリアルとジオメトリ ---------------------------- */
 const M = {};
 const GEO = {};
@@ -4505,18 +4804,26 @@ function initMaterials(){
     color, roughness: rough === undefined ? .95 : rough,
     flatShading: flat !== false
   });
-  // 地形の上面（参考映像に寄せた明るめの配色）
-  M.forest    = std(0x76a83f);
-  M.hills     = std(0xc4693c);
-  M.pasture   = std(0x8cc24c);
-  M.fields    = std(0xdcbc5a);
-  M.mountains = std(0x8b99a6);
-  M.desert    = std(0xe4d3a4);
-  M.gold      = std(0xc9a441);      // 金の川（探検者と海賊）
-  M.spice     = std(0x9fb85a);      // 香辛料の村
+  // 地形の上面。色は絵の側に描き、凹凸も同じ絵から起こす
+  const ground = (kind, rough) => {
+    const t = canvasTex(groundCanvas(kind));
+    return new THREE.MeshStandardMaterial({color: 0xffffff, map: t, bumpMap: t, bumpScale: .018,
+                                           roughness: rough || .95});
+  };
+  M.forest    = ground('forest');
+  M.hills     = ground('hills');
+  M.pasture   = ground('pasture');
+  M.fields    = ground('fields');
+  M.mountains = ground('mountains', .9);
+  M.desert    = ground('desert');
+  M.gold      = ground('gold', .8);      // 金の川（探検者と海賊）
+  M.spice     = ground('spice');         // 香辛料の村
   // 海へ落ちる断崖と、その上の砂の縁
-  M.cliff     = std(0x4b3a2b, 1);
-  M.sand      = std(0xd9c49a, 1);
+  const cliffTex = canvasTex(cliffCanvas(), 4, 1), sandTex = canvasTex(sandCanvas(), 8, .4);
+  M.cliff     = new THREE.MeshStandardMaterial({color: 0xffffff, map: cliffTex, bumpMap: cliffTex,
+                                                bumpScale: .03, roughness: 1});
+  M.sand      = new THREE.MeshStandardMaterial({color: 0xffffff, map: sandTex, bumpMap: sandTex,
+                                                bumpScale: .01, roughness: 1});
 
   M.trunk     = std(0x5b4128, 1);
   M.robber    = std(0x2b2b33, .85);
@@ -4534,17 +4841,27 @@ function initMaterials(){
   M.pirate    = std(0x1d2730, .8);
   M.pirateRim = std(0xd9c9a3, .8);
   M.hull      = std(0x6b4a2c, .9);
-  // 装飾用。色は1つずつ instanceColor で与えるので、下地は白にしておく
-  M.decor     = std(0xffffff, 1);
+  // 装飾用。色は1つずつ instanceColor で与え、形の頂点色（根元の陰り）と掛け合わせる。
+  // 草木はなめらかに、岩は面を立てて硬さを出す
+  M.decor      = new THREE.MeshStandardMaterial({color: 0xffffff, roughness: .92, vertexColors: true});
+  M.decorFacet = new THREE.MeshStandardMaterial({color: 0xffffff, roughness: .96, vertexColors: true,
+                                                 flatShading: true});
 
   // 使い回すジオメトリ。装飾はすべてこの型をインスタンス化して並べる
-  GEO.trunk  = new THREE.CylinderGeometry(.035, .052, 1, 5);  GEO.trunk.translate(0, .5, 0);
-  GEO.cone   = new THREE.ConeGeometry(.5, 1, 6);              GEO.cone.translate(0, .5, 0);
-  GEO.wheat  = new THREE.ConeGeometry(.5, 1, 4);              GEO.wheat.translate(0, .5, 0);
-  GEO.rock   = new THREE.DodecahedronGeometry(.5, 0);
-  GEO.peak   = new THREE.ConeGeometry(.5, 1, 5);  GEO.peak.translate(0, .5, 0);
-  GEO.bush   = new THREE.SphereGeometry(.5, 6, 4);
-  GEO.sphere = new THREE.SphereGeometry(.5, 7, 5);
+  GEO.trunk  = shadeByHeight(new THREE.CylinderGeometry(.035, .052, 1, 7).translate(0, .5, 0), .55, 1);
+  // 針葉の段。裾をぎざぎざに垂らし、底は開けておく（下から見えない面で法線を濁さない）
+  GEO.cone   = shadeByHeight(roughen(weld(new THREE.ConeGeometry(.5, 1, 11, 3, true).translate(0, .5, 0)),
+                                     .07, {ay: 1.6}), .55, 1.12);
+  // 麦の株。尖った円錐だと棘に見えるので、先の丸い穂の束にする
+  GEO.wheat  = shadeByHeight(roughen(weld(new THREE.SphereGeometry(.5, 7, 6).translate(0, .5, 0)),
+                                     .05), .5, 1.15);
+  GEO.rock   = shadeByHeight(roughen(new THREE.IcosahedronGeometry(.5, 1), .16), .62, 1.08);
+  GEO.peak   = shadeByHeight(roughen(new THREE.ConeGeometry(.5, 1, 9, 5).translate(0, .5, 0),
+                                     .11, {keepBase: true, ay: .6}), .7, 1.1, [.8, 1.9]);
+  GEO.bush   = shadeByHeight(roughen(weld(new THREE.SphereGeometry(.5, 11, 8)), .13), .5, 1.1);
+  GEO.sheep  = shadeByHeight(roughen(weld(new THREE.SphereGeometry(.5, 12, 8)), .07), .72, 1.04);
+  GEO.head   = shadeByHeight(weld(new THREE.SphereGeometry(.5, 10, 7)), .8, 1);
+  GEO.sphere = new THREE.SphereGeometry(.5, 12, 8);
   GEO.ring   = new THREE.RingGeometry(.5, .68, 24); GEO.ring.rotateX(-Math.PI / 2);
   // 海タイルの枠。六角形の輪郭をなぞる細いリング
   GEO.hexRing = new THREE.RingGeometry(.93, .985, 6, 1);
@@ -4667,9 +4984,9 @@ function pushInst(bin, x, y, z, sx, sy, sz, ry, color){
   bin.push({x, y, z, sx, sy, sz, rx:0, ry:ry || 0, rz:0, c:color});
 }
 
-function addInstanced(geo, list, receive){
+function addInstanced(geo, list, receive, mat){
   if(!list.length) return null;
-  const im = new THREE.InstancedMesh(geo, M.decor, list.length);
+  const im = new THREE.InstancedMesh(geo, mat || M.decor, list.length);
   const mtx = new THREE.Matrix4(), q = new THREE.Quaternion();
   const e = new THREE.Euler(), p = new THREE.Vector3(), s = new THREE.Vector3();
   list.forEach((it, i) => {
@@ -4694,7 +5011,7 @@ function addInstanced(geo, list, receive){
 function addTree(bins, x, z, s){
   const ry = Math.random() * 6.2832;
   pushInst(bins.trunk, x, TOP_Y, z, s, .17 * s, s, ry, varyColor(0x5b4128, .02, .08, .10));
-  const col = varyColor(0x3d7c36, .05, .14, .16);
+  const col = varyColor(0x2f6130, .05, .16, .18);
   // [高さ, 半径, 円錐の高さ]
   [[.11, .135, .27], [.25, .105, .23], [.39, .072, .21]].forEach(t => {
     pushInst(bins.cone, x, TOP_Y + t[0] * s, z,
@@ -4716,8 +5033,8 @@ function tileDecor(h, bins){
     const dir = Math.random() * 6.2832;
     spots(h, 150, {sep:.068, rMin:.44, shrink:.86, corner:.34}).forEach(p => {
       const s = rnd(.8, 1.25);
-      pushInst(bins.wheat, p[0], TOP_Y, p[1], .082 * s, .23 * s, .082 * s,
-               dir + (Math.random() - .5) * .4, varyColor(0xd9bc55, .03, .12, .12));
+      pushInst(bins.wheat, p[0], TOP_Y, p[1], .05 * s, .25 * s, .05 * s,
+               dir + (Math.random() - .5) * .4, varyColor(0xcfae58, .03, .14, .14));
     });
     spots(h, 6, {sep:.22}).forEach(p => bush(p[0], p[1], rnd(.10, .17), 1.7, .9, 0x6d7f33));
   } else if(h.type === 'pasture'){
@@ -4738,9 +5055,9 @@ function tileDecor(h, bins){
   } else if(h.type === 'hills'){
     // 丘陵：赤みの低木が連なって起伏に見えるよう、大小を混ぜて密に置く
     spots(h, 9, {sep:.23, rMin:.52}).forEach(p =>
-      bush(p[0], p[1], rnd(.19, .27), 1.9, .85, 0xa8512b));
+      bush(p[0], p[1], rnd(.19, .27), 1.9, .85, 0x7d6a33));
     spots(h, 22, {sep:.125}).forEach(p =>
-      bush(p[0], p[1], rnd(.09, .17), 1.6, 1.05, 0x8a3f26));
+      bush(p[0], p[1], rnd(.09, .17), 1.6, 1.05, 0x5f6b2c));
     spots(h, 10, {sep:.15}).forEach(p => {
       const s = rnd(.07, .14);
       pushInst(bins.rock, p[0], TOP_Y + s * .28, p[1], s * 1.5, s, s * 1.4,
@@ -4756,7 +5073,7 @@ function tileDecor(h, bins){
                       sx: w * 2 * rnd(.78, 1.25), sy: rnd(.34, .70), sz: w * 2 * rnd(.78, 1.25),
                       rx: (Math.random() - .5) * .34, ry: Math.random() * 6.2832,
                       rz: (Math.random() - .5) * .34,
-                      c: varyColor(0x7f8b99, .025, .07, .22)});
+                      c: varyColor(0x767d86, .025, .06, .2)});
     });
     // 裾の小岩。これも青灰にして、浜の岩と見分けがつくようにする
     spots(h, 16, {sep:.125}).forEach(p => {
@@ -4853,6 +5170,8 @@ function addHexVisual(h, bins){
   h.mat.emissiveIntensity = 0;
   const top = new THREE.Mesh(GEO.hexTop, [M.sand, h.mat, M.cliff]);
   top.position.set(h.x, TOP_Y - .08, h.z);
+  // 同じ種類のタイルは同じ絵を使うので、60°単位で回して並びの繰り返しを隠す
+  top.rotation.y = Math.floor(Math.random() * 6) * Math.PI / 3;
   top.castShadow = true; top.receiveShadow = true;
   top.userData = {hex: h.id};
   boardGroup.add(top);
@@ -4886,10 +5205,10 @@ function addAllInstanced(bins){
   addInstanced(GEO.cone,   bins.cone);
   addInstanced(GEO.wheat,  bins.wheat);
   addInstanced(GEO.bush,   bins.bush, true);
-  addInstanced(GEO.sphere, bins.sheep);
-  addInstanced(GEO.sphere, bins.face);
-  addInstanced(GEO.rock,   bins.rock, true);
-  addInstanced(GEO.peak,   bins.peak, true);
+  addInstanced(GEO.sheep,  bins.sheep);
+  addInstanced(GEO.head,   bins.face);
+  addInstanced(GEO.rock,   bins.rock, true, M.decorFacet);
+  addInstanced(GEO.peak,   bins.peak, true, M.decorFacet);
 }
 
 // 島の縁：浅瀬のにじみ、波打ち際、海から突き出す岩
@@ -5085,12 +5404,6 @@ function flashHexes(ids){
     ids.forEach(id => {
       const h = G.hexes[id];
       if(h.mat) h.mat.emissiveIntensity = Math.max(0, v * .30);
-      // 数字札が跳ねて1回転する。どの数字で出たかを目で追えるように
-      if(h.token){
-        const j = Math.min(1, k * 1.6);
-        h.token.position.y = TOP_Y + .035 + Math.sin(Math.PI * j) * .42;
-        h.token.rotation.y = Math.PI / 2 + easeInOut(j) * Math.PI * 2;
-      }
     });
     rings.forEach(m => {
       const s = .5 + k * 1.9;
@@ -5103,7 +5416,6 @@ function flashHexes(ids){
     ids.forEach(id => {
       const h = G.hexes[id];
       if(h.mat) h.mat.emissiveIntensity = 0;
-      if(h.token){ h.token.position.y = TOP_Y + .035; h.token.rotation.y = Math.PI / 2; }
     });
   });
 }
@@ -5161,10 +5473,14 @@ function playerMats(p){
   };
   // 壁は持ち主の色を少し起こした明るい色、屋根は同系の濃い色。
   // 生成りに寄せすぎると誰の建物か分からなくなるので、色味は残す
+  // 壁は漆喰のむら、屋根は瓦の段を灰色の絵で掛け合わせる（色は持ち主のまま）
+  if(!M.plasterTex){ M.plasterTex = canvasTex(plasterCanvas()); M.roofTex = canvasTex(roofCanvas()); }
   p._mats = {
     body: mk(body, .72),
-    wall: mk(body.clone().lerp(new THREE.Color(0xf6f1e4), .34), .82),
-    roof: mk(body.clone().multiplyScalar(.58), .86),
+    wall: mk(body.clone().lerp(new THREE.Color(0xf6f1e4), .34), .82,
+             {map: M.plasterTex, bumpMap: M.plasterTex, bumpScale: .01}),
+    roof: mk(body.clone().multiplyScalar(.58), .86,
+             {map: M.roofTex, bumpMap: M.roofTex, bumpScale: .02}),
     flag: mk(body, .6, {emissive: body.clone().multiplyScalar(.22), side: THREE.DoubleSide})
   };
   return p._mats;
@@ -6163,6 +6479,11 @@ function animate(t){
     const o = ripple.material.map.offset;
     o.x = (t * .0000105) % 1;
     o.y = (t * .0000072) % 1;
+  }
+  if(water && water.material.normalMap){
+    const o = water.material.normalMap.offset;
+    o.x = (t * .0000062) % 1;
+    o.y = (-t * .0000041) % 1;
   }
   // 小舟を波で揺らす
   for(let i = 0; i < bobbers.length; i++){
