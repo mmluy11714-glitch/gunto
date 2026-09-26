@@ -4656,7 +4656,7 @@ function groundCanvas(kind){
     // 岩肌：斜めの地層と、苔・がれ
     const warp = makeNoise(6);
     c = paintCanvas(S, (u, v) => {
-      const b = base(0x5a6674, 0x93a0ae, u, v, 2.2);
+      const b = base(0x6e655c, 0xa0968a, u, v, 2.2);
       const s = .5 + .5 * Math.sin((v + u * .35) * 6.2832 * 11 + fbm(warp, u, v, 3) * 7);
       const f = .84 + s * .2;
       return [b[0] * f, b[1] * f, b[2] * f];
@@ -4840,6 +4840,8 @@ function initMaterials(){
   M.hull      = std(0x6b4a2c, .9);
   // 装飾用。色は1つずつ instanceColor で与え、形の頂点色（根元の陰り）と掛け合わせる。
   M.decor      = new THREE.MeshStandardMaterial({color: 0xffffff, roughness: .92, vertexColors: true});
+  // 削った石や葉の房は面を立てて塗る
+  M.decorFlat  = new THREE.MeshStandardMaterial({color: 0xffffff, roughness: .95, vertexColors: true, flatShading: true});
 
   // 使い回すジオメトリ。装飾はすべてこの型をインスタンス化して並べる
   // 岩も面を立てず、丸みのある塊にする（角ばった多面体はブロックに見える）
@@ -4851,12 +4853,6 @@ function initMaterials(){
   // 海タイルの枠。六角形の輪郭をなぞる細いリング
   GEO.hexRing = new THREE.RingGeometry(.93, .985, 6, 1);
   GEO.hexRing.rotateZ(Math.PI / 6);
-  /* 船体。舳先が尖った細い箱に帆を1枚立てる。
-     群島は1つの島より広く、カメラが遠いので、街道より一回り大きく作る */
-  GEO.hull   = new THREE.CylinderGeometry(.14, .09, .74, 3);
-  GEO.hull.rotateZ(Math.PI / 2); GEO.hull.rotateY(Math.PI / 2);
-  GEO.mast   = new THREE.CylinderGeometry(.022, .022, .50, 4); GEO.mast.translate(0, .25, 0);
-  GEO.shipSail = new THREE.PlaneGeometry(.34, .34);
   GEO.puff   = new THREE.SphereGeometry(.055, 6, 4);
   GEO.pole   = new THREE.CylinderGeometry(.022, .022, 1, 5);  GEO.pole.translate(0, .5, 0);
   GEO.flag   = new THREE.PlaneGeometry(.24, .16);
@@ -4893,9 +4889,6 @@ function initMaterials(){
   // 港
   GEO.deck  = new THREE.BoxGeometry(.62, .08, .42);
   GEO.sign  = new THREE.BoxGeometry(.58, .04, .58);
-  GEO.hull  = new THREE.ConeGeometry(.12, .42, 4); GEO.hull.rotateZ(Math.PI / 2);
-  GEO.sailP = new THREE.PlaneGeometry(.26, .34);
-  GEO.mast  = new THREE.CylinderGeometry(.012, .012, .40, 4);
   GEO.peg   = new THREE.CylinderGeometry(.05, .05, .36, 6);
   // 盗賊
   GEO.rBody = new THREE.ConeGeometry(.17, .46, 8);
@@ -4910,9 +4903,9 @@ function initMaterials(){
    1つの形にまとめてからインスタンスで並べる（描画の回数は増やさない）  */
 const _pq = new THREE.Quaternion(), _pe = new THREE.Euler(), _pv = new THREE.Vector3(), _ps = new THREE.Vector3();
 // 部品1つ：形を複製して位置・向き・大きさを焼き込み、色を頂点に持たせる
-function part(geo, color, p, r, s){
+function part(geo, color, p, r, s, keepUv){
   const g = geo.index ? geo.toNonIndexed() : geo.clone();
-  if(g.attributes.uv) g.deleteAttribute('uv');
+  if(g.attributes.uv && !keepUv) g.deleteAttribute('uv');
   if(!g.attributes.normal) g.computeVertexNormals();
   _pe.set(r ? r[0] : 0, r ? r[1] : 0, r ? r[2] : 0);
   _pq.setFromEuler(_pe);
@@ -4932,11 +4925,13 @@ function mergeParts(parts, ao){
   let n = 0;
   parts.forEach(g => { n += g.attributes.position.count; });
   const pos = new Float32Array(n * 3), nor = new Float32Array(n * 3), col = new Float32Array(n * 3);
+  const hasUv = parts.every(g => g.attributes.uv), uv = hasUv ? new Float32Array(n * 2) : null;
   let o = 0;
   parts.forEach(g => {
     pos.set(g.attributes.position.array, o);
     nor.set(g.attributes.normal.array, o);
     col.set(g.attributes.color.array, o);
+    if(hasUv) uv.set(g.attributes.uv.array, o / 3 * 2);
     o += g.attributes.position.count * 3;
     g.dispose();
   });
@@ -4944,6 +4939,7 @@ function mergeParts(parts, ao){
   out.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   out.setAttribute('normal', new THREE.BufferAttribute(nor, 3));
   out.setAttribute('color', new THREE.BufferAttribute(col, 3));
+  if(hasUv) out.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
   if(ao !== undefined){
     out.computeBoundingBox();
     const b = out.boundingBox, h = (b.max.y - b.min.y) || 1;
@@ -5054,63 +5050,6 @@ function makeFenceGeo(){
   parts.push(part(rail, 0x8e6e4c, [0, .095, 0], [0, 0, rr(-.03, .03)]));
   return mergeParts(parts, .7);
 }
-// 枝の段：裾がぎざぎざに垂れ、枝先ほど明るい（日の当たる葉先）
-function branchTier(seg){
-  const g = roughen(weld(new THREE.ConeGeometry(.5, 1, seg || 14, 3, true).translate(0, .5, 0)), .09, {ay: 1.8});
-  const p = g.attributes.position, col = [];
-  for(let i = 0; i < p.count; i++){
-    const r = Math.hypot(p.getX(i), p.getZ(i)) / .55;
-    const f = .62 + .5 * clamp01(r) + jitterAt(p.getX(i) * 1e3, p.getY(i) * 1e3, p.getZ(i) * 1e3, 9) * .18;
-    col.push(f, f, f);
-  }
-  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  return g;
-}
-// トウヒ：細く高い。段を多く重ね、上ほど細くする
-function makeSpruceGeo(){
-  const tier = branchTier(), parts = [
-    part(new THREE.CylinderGeometry(.5, .7, 1, 7).translate(0, .5, 0), 0x4e3824, null, null, [.04, .5, .04])];
-  const n = 8;
-  for(let i = 0; i < n; i++){
-    const t = i / (n - 1);
-    const r = .16 * (1 - t) + .03, y = .05 + t * .4;
-    const c = new THREE.Color(0x1b3c22).lerp(new THREE.Color(0x2e5e36), t);
-    parts.push(part(tier, c, [rr(-.006, .006), y, rr(-.006, .006)], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)],
-                    [r * 2, .13 - t * .04, r * 2]));
-  }
-  parts.push(part(new THREE.ConeGeometry(.5, 1, 6).translate(0, .5, 0), 0x2f6036, [0, .47, 0], null, [.02, .08, .02]));
-  return mergeParts(parts, .55);
-}
-// モミ：ずんぐりと裾が広く、段の間が詰まる
-function makeFirGeo(){
-  const tier = branchTier(16), parts = [
-    part(new THREE.CylinderGeometry(.5, .7, 1, 7).translate(0, .5, 0), 0x5a4029, null, null, [.05, .3, .05])];
-  const n = 6;
-  for(let i = 0; i < n; i++){
-    const t = i / (n - 1);
-    const r = .2 * Math.pow(1 - t, .9) + .03, y = .04 + t * .3;
-    const c = new THREE.Color(0x23472a).lerp(new THREE.Color(0x3c7240), t);
-    parts.push(part(tier, c, [0, y, 0], [rr(-.1, .1), rr(0, 6.28), rr(-.1, .1)], [r * 2, .14, r * 2]));
-  }
-  return mergeParts(parts, .55);
-}
-// 広葉樹：二股の幹から枝を出し、たくさんの葉の塊で樹冠をつくる。上の塊ほど明るい
-function makeBroadleafGeo(h, greens){
-  const blob = roughen(weld(new THREE.SphereGeometry(.5, 9, 7)), .12);
-  const trunk = new THREE.CylinderGeometry(.5, .7, 1, 6).translate(0, .5, 0);
-  const parts = [part(trunk, 0x5e4630, null, [0, 0, .06], [.035, h * .55, .035]),
-                 part(trunk, 0x5e4630, [0, h * .3, 0], [.5, 0, -.35], [.022, h * .35, .022]),
-                 part(trunk, 0x5e4630, [0, h * .32, 0], [-.4, 0, .45], [.02, h * .3, .02])];
-  const cy = h * .68, R = h * .3;
-  for(let i = 0; i < 14; i++){
-    const a = Math.random() * 6.283, e = rr(-.3, 1.2);
-    const x = Math.cos(a) * Math.cos(e) * R, y = Math.sin(e) * R * .8, z = Math.sin(a) * Math.cos(e) * R;
-    const s = rr(.1, .15) * h / .4;
-    const c = new THREE.Color(greens[i % greens.length]).multiplyScalar(.85 + clamp01((y / R + .3) / 1.3) * .35);
-    parts.push(part(blob, c, [x, cy + y, z], [0, rr(0, 6.28), 0], [s, s * .85, s]));
-  }
-  return mergeParts(parts, .6);
-}
 // 切り株と、足元のシダ
 function makeStumpGeo(){
   const c = new THREE.CylinderGeometry(.5, .6, 1, 9).translate(0, .5, 0);
@@ -5148,7 +5087,7 @@ function makeMineGeo(){
   const lump = roughen(weld(new THREE.SphereGeometry(.5, 12, 8, 0, 6.2832, 0, Math.PI / 2)), .05, {keepBase: true});
   const box = new THREE.BoxGeometry(1, 1, 1), ore = new THREE.IcosahedronGeometry(.5, 0);
   const parts = [
-    part(lump, 0x6c7482, [-.06, 0, 0], null, [.34, .26, .36]),
+    part(lump, 0x8a7b6e, [-.06, 0, 0], null, [.34, .26, .36]),
     part(box, 0x121212, [.1, .065, 0], null, [.02, .12, .1]),
     part(box, 0x6e5234, [.115, .07, .06], null, [.025, .14, .025]),
     part(box, 0x6e5234, [.115, .07, -.06], null, [.025, .14, .025]),
@@ -5171,6 +5110,110 @@ function makeCactusGeo(){
     part(c, g, [-.06, .12, 0], null, [.03, .05, .03]), part(cap, g, [-.06, .17, 0], null, [.03, .02, .03])
   ], .75);
 }
+/* 割れた石塊。丸い塊を不規則な平面で何度も切り落とし、割れ面を作る。
+   上をすぼめて傾け、柱や板のような整った形にしない                      */
+function rockChunk(w, h, d, cuts, taper){
+  const g = weld(new THREE.IcosahedronGeometry(.5, 3));
+  const p = g.attributes.position, v = new THREE.Vector3();
+  const planes = [];
+  for(let i = 0; i < (cuts || 9); i++){
+    // 側面は横向き、ときどき上面を斜めに切る
+    const up = i === 0 ? rr(.5, .9) : rr(-.35, .45);
+    const a = rr(0, 6.283), k = Math.sqrt(1 - up * up);
+    planes.push({n: new THREE.Vector3(Math.cos(a) * k, up, Math.sin(a) * k), d: rr(.3, .44)});
+  }
+  for(let i = 0; i < p.count; i++){
+    v.fromBufferAttribute(p, i);
+    planes.forEach(pl => { const t = v.dot(pl.n) - pl.d; if(t > 0) v.addScaledVector(pl.n, -t); });
+    const ty = v.y + .5;
+    const sc = 1 - (taper || 0) * ty;
+    p.setXYZ(i, v.x * w * sc, (v.y + .5) * h, v.z * d * sc);
+  }
+  return roughen(g, Math.min(w, h, d) * .03);
+}
+const ROCK_COLS = [0x8a796b, 0x7b6b5f, 0x968474, 0x6e5f55, 0x847468];
+function makeOutcropGeo(){
+  const parts = [];
+  const col = () => ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)];
+  // 低く横に広い岩塊を寄せて積む（縦長に立てると墓石や柱に見える）
+  parts.push(part(rockChunk(.34, .2, .28, 11, .3), col(), [-.02, -.03, -.04], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)]));
+  parts.push(part(rockChunk(.26, .16, .22, 10, .25), col(), [rr(-.2, -.14), -.02, rr(-.02, .06)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
+  parts.push(part(rockChunk(.24, .14, .2, 10, .25), col(), [rr(.12, .18), -.02, rr(-.06, .02)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
+  // 上に載って少し傾いた平たい岩
+  parts.push(part(rockChunk(.22, .08, .16, 9, .1), col(), [rr(-.04, .06), .13, rr(-.04, .02)], [rr(-.2, .2), rr(0, 6.28), rr(-.25, .25)]));
+  // 手前の岩塊とこぼれた小石
+  for(let i = 0; i < 5; i++){
+    const s = rr(.08, .13), a = rr(-1.2, 1.2) + Math.PI / 2, d = rr(.13, .21);
+    parts.push(part(rockChunk(s * rr(1.1, 1.5), s * rr(.7, 1), s * rr(.9, 1.2), 8, .2), col(),
+                    [Math.cos(a) * d, -.01, Math.sin(a) * d], [rr(-.2, .2), rr(0, 6.28), rr(-.2, .2)]));
+  }
+  for(let i = 0; i < 9; i++){
+    const s = rr(.025, .05), a = rr(0, 6.28), d = rr(.18, .3);
+    parts.push(part(rockChunk(s * 1.3, s * .8, s, 6, .1), col(),
+                    [Math.cos(a) * d, -.005, Math.sin(a) * d], [rr(0, .6), rr(0, 6.28), rr(0, .6)]));
+  }
+  const g = mergeParts(parts);
+  // 面の向きと割れ目で明暗をつける
+  const pos = g.attributes.position, nor = g.attributes.normal, c = g.attributes.color;
+  g.computeBoundingBox();
+  const top = g.boundingBox.max.y || 1;
+  for(let i = 0; i < pos.count; i++){
+    const ny = nor.getY(i), x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    let f = .72 + clamp01(ny) * .42 + clamp01(y / top) * .12;
+    const crack = Math.abs(Math.sin(x * 70 + Math.sin(y * 30) * 2 + z * 25));
+    if(crack < .1 && ny < .5) f *= .6;
+    if(jitterAt(x * 1e3, y * 1e3, z * 1e3, 11) > .38) f *= 1.12;          // 明るい斑
+    c.setXYZ(i, c.getX(i) * f, c.getY(i) * f, c.getZ(i) * f);
+  }
+  return g;
+}
+
+/* 広葉樹。幹と枝、樹冠の芯（暗い塊）に、葉の絵を貼った板を何十枚も重ねる。
+   板の縁が葉の形で切り抜かれるので、輪郭がぎざぎざの葉むらになる。
+   外側と上ほど日が当たって明るく、内側は暗い                              */
+function leafCanvas(){
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const x = c.getContext('2d');
+  for(let i = 0; i < 260; i++){
+    // 真ん中ほど葉が密で、外へ行くほどまばら
+    const a = Math.random() * 6.283, r = Math.pow(Math.random(), .75) * 118;
+    const px = 128 + Math.cos(a) * r, py = 128 + Math.sin(a) * r;
+    const l = 150 + Math.random() * 105;
+    x.fillStyle = `rgb(${l * .92 | 0},${l | 0},${l * .86 | 0})`;
+    x.save(); x.translate(px, py); x.rotate(Math.random() * 6.283);
+    const s = 5 + Math.random() * 7;
+    x.beginPath(); x.moveTo(0, -s * 1.3); x.quadraticCurveTo(s * .9, 0, 0, s * 1.3); x.quadraticCurveTo(-s * .9, 0, 0, -s * 1.3);
+    x.fill();
+    x.restore();
+  }
+  return c;
+}
+function makeLeafyTree(h, greens){
+  const bark = new THREE.CylinderGeometry(.5, .75, 1, 7).translate(0, .5, 0);
+  const barkC = 0x4a4540;
+  const cy = h * .66, RX = h * .42, RY = h * .3;
+  const wood = [
+    part(bark, barkC, null, [rr(-.05, .05), 0, rr(-.05, .05)], [.045, h * .5, .045]),
+    part(bark, barkC, [0, h * .42, 0], [.55, 0, -.3], [.026, h * .3, .026]),
+    part(bark, barkC, [0, h * .44, 0], [-.45, 0, .5], [.024, h * .28, .024]),
+    part(bark, barkC, [0, h * .46, 0], [.1, 0, .05], [.022, h * .3, .022]),
+    // 葉むらの隙間から空が抜けないよう、暗い芯を入れる
+    part(roughen(weld(new THREE.SphereGeometry(.5, 10, 8)), .08), new THREE.Color(greens[3]).multiplyScalar(.6),
+         [0, cy, 0], null, [RX * 1.5, RY * 1.5, RX * 1.5])
+  ];
+  const card = new THREE.PlaneGeometry(1, 1), sun = new THREE.Vector3(.5, .8, .35).normalize(), leaves = [];
+  for(let i = 0; i < 120; i++){
+    const a = Math.random() * 6.283, e = Math.asin(rr(-.5, 1)), k = rr(.6, 1.08);
+    const ox = Math.cos(a) * Math.cos(e) * RX * k, oy = Math.sin(e) * RY * k, oz = Math.sin(a) * Math.cos(e) * RX * k;
+    const dir = new THREE.Vector3(ox / RX, oy / RY, oz / RX).normalize();
+    const light = .5 + clamp01(dir.dot(sun) * .5 + .5) * .55 + (k - .9) * .8;
+    const c = new THREE.Color(greens[i % 3]).multiplyScalar(light);
+    const s = rr(.15, .23) * h / .42;
+    leaves.push(part(card, c, [ox, cy + oy, oz], [rr(0, 6.28), rr(0, 6.28), rr(0, 6.28)], s, true));
+  }
+  return {wood: mergeParts(wood, .6), leaf: mergeParts(leaves)};
+}
 function initProps(){
   GEO.wheatClump = makeWheatGeo();
   GEO.hay       = makeHayGeo();
@@ -5179,10 +5222,20 @@ function initProps(){
   GEO.tuft      = makeTuftGeo();
   GEO.sheep2    = makeSheepGeo();
   GEO.fence     = makeFenceGeo();
-  GEO.spruce    = makeSpruceGeo();
-  GEO.fir       = makeFirGeo();
-  GEO.broadleaf = makeBroadleafGeo(.42, [0x4c8a34, 0x437d2e, 0x57963a]);
-  GEO.broadleaf2 = makeBroadleafGeo(.36, [0x6a8f2e, 0x5b8030, 0x7a9c38]);
+  const t1 = makeLeafyTree(.46, [0x3f7a2c, 0x4c8c34, 0x5a9a3a, 0x2c5a22]);
+  const t2 = makeLeafyTree(.38, [0x4f8a2e, 0x5c9a36, 0x6aa63e, 0x365f22]);
+  GEO.broadleaf = t1.wood; GEO.broadleafLeaf = t1.leaf;
+  GEO.broadleaf2 = t2.wood; GEO.broadleaf2Leaf = t2.leaf;
+  const t3 = makeLeafyTree(.52, [0x356f2a, 0x447f30, 0x528e38, 0x264f1e]);
+  GEO.broadleaf3 = t3.wood; GEO.broadleaf3Leaf = t3.leaf;
+  // 葉の板の材質。絵の透けた所は切り抜き、影も葉の形で落とす
+  const leafTex = canvasTex(leafCanvas());
+  M.leaf = new THREE.MeshStandardMaterial({map: leafTex, alphaTest: .5, side: THREE.DoubleSide,
+                                          vertexColors: true, roughness: .8});
+  M.leafDepth = new THREE.MeshDepthMaterial({depthPacking: THREE.RGBADepthPacking, map: leafTex, alphaTest: .5});
+  GEO.outcropA  = makeOutcropGeo();
+  GEO.outcropB  = makeOutcropGeo();
+  GEO.outcropC  = makeOutcropGeo();
   GEO.stump     = makeStumpGeo();
   GEO.fern      = makeFernGeo();
   GEO.brickStack = makeBrickStackGeo();
@@ -5281,107 +5334,6 @@ function addInstanced(geo, list, receive, mat){
   return im;
 }
 
-/* 岩山。円錐を並べると作り物に見えるので、タイルごとに起伏の面を1枚作る。
-   峰ごとの盛り上がりに稜線のノイズを掛け、斜面の傾きと高さで
-   岩肌・岩陰・雪・裾のがれ場を塗り分ける。数字札と建物の場所は平らに残す */
-function addMountainMesh(h){
-  const N = 110, SZ = HEX_SIZE;
-  const ridge = makeNoise(7), bump = makeNoise(19), tint = makeNoise(5);
-  /* 山並みは数字札の奥（初期の視点から見て向こう側、-Z）に1本の尾根として置き、
-     手前は低い丘だけにする。札を峰で囲むと火口のように見えるため。
-     峰は幅広く、裾どうしを重ねてつなげる（尖った円錐を並べない）            */
-  const peaks = [];
-  const nP = 7;
-  for(let i = 0; i < nP; i++){
-    const t = i / (nP - 1) - .5;                          // -0.5〜0.5：尾根の端から端
-    const a = -Math.PI / 2 + t * 2.5 + rr(-.12, .12);
-    const d = rr(.5, .66) + Math.abs(t) * .12;
-    const x = Math.cos(a) * d, z = Math.sin(a) * d;
-    if(HEX_CORNER.some(c => Math.hypot(c[0] - x, c[1] - z) < .3)) continue;
-    peaks.push({x, z, r: rr(.36, .5), hgt: rr(.3, .44) * (1 - Math.abs(t) * .5)});
-  }
-  // 主峰は札の真後ろ寄り
-  peaks.push({x: rr(-.12, .12), z: -rr(.52, .6), r: rr(.42, .5), hgt: rr(.56, .66)});
-  // 手前の小さな岩の丘
-  spots(h, 3, {sep:.3, rMin:.55, corner:.4, shrink:.84}).filter(p => p[1] > h.z + .15).forEach(p =>
-    peaks.push({x: p[0] - h.x, z: p[1] - h.z, r: rr(.2, .28), hgt: rr(.07, .12)}));
-  const ridged = (u, v) => {
-    let s = 0, amp = .5, f = 1, tot = 0;
-    for(let i = 0; i < 4; i++){
-      s += (1 - Math.abs(ridge(u * 7 * f, v * 7 * f) * 2 - 1)) * amp;
-      tot += amp; amp *= .5; f *= 2;
-    }
-    return s / tot;
-  };
-  const pos = [], heights = [], inside = [];
-  for(let j = 0; j <= N; j++){
-    for(let i = 0; i <= N; i++){
-      const x = (i / N * 2 - 1) * SZ, z = (j / N * 2 - 1) * SZ;
-      const u = i / N, v = j / N, d = Math.hypot(x, z);
-      // 肩の丸い盛り上がりを足し合わせ、上限で抑えて尾根をつなげる
-      let y = 0, top1 = 0;
-      peaks.forEach(pk => {
-        const t = clamp01(1 - Math.hypot(x - pk.x, z - pk.z) / pk.r);
-        const f = pk.hgt * t * t * (3 - 2 * t);
-        y += f * .55; top1 = Math.max(top1, f);
-      });
-      y = Math.max(y, top1);
-      // 稜線と沢の刻み。高い所ほど岩が荒れる
-      const rg = ridged(u, v);
-      y = y * (.6 + .6 * rg) + .035 + (bump(u * 19, v * 19) - .5) * .03 + rg * .03;
-      // 数字札・建物・街道の場所は平らに戻す
-      let m = clamp01((d - .38) / .1);
-      let edge = 1;
-      for(let k = 0; k < 6; k++) edge = Math.min(edge, (HEX_IN * .9 - (x * HEX_NORM[k][0] + z * HEX_NORM[k][1])) / .12);
-      m *= clamp01(edge);
-      HEX_CORNER.forEach(c => { m *= clamp01((Math.hypot(c[0] - x, c[1] - z) - .3) / .12); });
-      y *= m;
-      pos.push(x, y, z);
-      heights.push(y);
-      inside.push(inHex(x, z, 1.0));
-    }
-  }
-  const idx = [], W = N + 1;
-  for(let j = 0; j < N; j++){
-    for(let i = 0; i < N; i++){
-      const a = j * W + i, b = a + 1, c = a + W, d2 = c + 1;
-      // 盛り上がりのない所と、六角形の外は面を作らない（下の地面の絵を見せる）
-      if(!(inside[a] && inside[b] && inside[c] && inside[d2])) continue;
-      if(Math.max(heights[a], heights[b], heights[c], heights[d2]) < .004) continue;
-      idx.push(a, c, b, b, c, d2);
-    }
-  }
-  const g = new THREE.BufferGeometry();
-  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-  g.setIndex(idx);
-  g.computeVertexNormals();
-  const nor = g.attributes.normal, col = [];
-  const top = Math.max(.01, ...heights);
-  const rock = new THREE.Color(0x857d72), dark = new THREE.Color(0x3d3935), scree = new THREE.Color(0x8e887c),
-        grass = new THREE.Color(0x76735e), snow = new THREE.Color(0xf3f5f7), c = new THREE.Color();
-  for(let k = 0; k < heights.length; k++){
-    const y = heights[k], ny = nor.getY(k), x = pos[k * 3], z = pos[k * 3 + 2];
-    const u = (x / SZ + 1) / 2, v = (z / SZ + 1) / 2;
-    const steep = clamp01((.85 - ny) / .45);
-    c.copy(rock).lerp(dark, steep * .85);
-    // 横に走る地層
-    const band = .5 + .5 * Math.sin(y * 70 + tint(u * 5, v * 5) * 6);
-    c.multiplyScalar(.9 + band * .14 + (tint(u * 5, v * 5) - .5) * .2);
-    if(y < .1) c.lerp(tint(u * 11, v * 11) < .5 ? scree : grass, clamp01((.1 - y) / .08) * .5);
-    const snowLine = top * .7 + (bump(u * 19, v * 19) - .5) * .08;
-    if(y > snowLine && ny > .45) c.lerp(snow, clamp01((y - snowLine) / .05) * clamp01((ny - .45) / .2));
-    col.push(c.r, c.g, c.b);
-  }
-  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
-  const m = new THREE.Mesh(own(g), M.terrain || (M.terrain = new THREE.MeshStandardMaterial({
-    vertexColors: true, roughness: .95
-  })));
-  m.position.set(h.x, TOP_Y - .006, h.z);
-  m.castShadow = true; m.receiveShadow = true;
-  boardGroup.add(m);
-  own(m);
-}
-
 const B = (bins, k) => bins[k] || (bins[k] = []);
 // 模型は色を頂点に持つので、インスタンスの色は明るさを少し揺らすだけにする
 const tint = d => varyColor(0xf0f0f0, 0, 0, d || .12);
@@ -5414,11 +5366,14 @@ function tileDecor(h, bins){
 
   if(h.type === 'forest'){
     // 針葉樹を主に、広葉樹を混ぜる。伐った丸太の山で「木材」を示す
-    // 木は4種の形を混ぜ、背丈をばらつかせる
-    spots(h, 34, {sep:.14, rMin:.5}).forEach(p => {
+    // 葉の茂った広葉樹を3種混ぜ、背丈をばらつかせる
+    // 数字札に樹冠がかぶらないよう、札のまわりは広めに空ける
+    spots(h, 22, {sep:.17, rMin:.62}).forEach(p => {
       const r = Math.random();
-      const k = r < .4 ? 'spruce' : r < .7 ? 'fir' : r < .87 ? 'broadleaf' : 'broadleaf2';
-      put(k, p, rnd(.8, 1.3), undefined, varyColor(0xeef2ea, .03, .08, .16));
+      const k = r < .4 ? 'broadleaf' : r < .75 ? 'broadleaf2' : 'broadleaf3';
+      const sc = rnd(.75, 1.1), ry = ang(), c = varyColor(0xeef2ea, .03, .08, .16);
+      put(k, p, sc, ry, c);
+      if(GEO[k + 'Leaf']) put(k + 'Leaf', p, sc, ry, c);
     });
     spots(h, 1, {rMin:.55, corner:.45}).forEach(p => put('logs', p, rnd(.9, 1.1)));
     spots(h, 3, {sep:.2}).forEach(p => put('stump', p, rnd(.8, 1.2)));
@@ -5451,15 +5406,20 @@ function tileDecor(h, bins){
     spots(h, 4, {sep:.16}).forEach(p => bush(p[0], p[1], rnd(.1, .16), 1.8, .6, 0xa65634));
     spots(h, 12, {sep:.1}).forEach(p => tuft(p, rnd(.6, .95), 0xa39a52));
   } else if(h.type === 'mountains'){
-    // 岩山の起伏と、鉱石を運び出す坑口
-    addMountainMesh(h);
+    // 岩だらけの地形：割れた石塊の露頭を数字札のまわりに寄せ、小石を散らす
+    spots(h, 6, {sep:.3, rMin:.52, corner:.4, shrink:.86}).forEach((p, i) => {
+      // 背の高い柱岩が奥に来るよう、札の外側へ向ける
+      const out = Math.atan2(p[1] - h.z, p[0] - h.x);
+      put(['outcropA', 'outcropB', 'outcropC'][i % 3], p, rnd(.8, 1.15), -out - Math.PI / 2 + rnd(-.5, .5), tint(.1));
+    });
     // 坑口は山の手前の麓に、手前を向けて置く
     spots(h, 8, {rMin:.5, corner:.45}).filter(p => p[1] > h.z + .1).slice(0, 1).forEach(p =>
       put('mine', p, rnd(.95, 1.1), -Math.atan2(p[1] - h.z, p[0] - h.x)));
-    spots(h, 12, {sep:.12}).forEach(p => {
-      const sz = rnd(.06, .12);
-      pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.5, sz * 1.1, sz * 1.4, ang(), varyColor(0x6c7683, .02, .06, .14));
+    spots(h, 16, {sep:.09}).forEach(p => {
+      const sz = rnd(.04, .09);
+      pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.5, sz * 1.1, sz * 1.4, ang(), varyColor(0x8c7c70, .02, .08, .14));
     });
+    spots(h, 6, {sep:.12}).forEach(p => tuft(p, rnd(.5, .8), 0x8a8a52));
   } else if(h.type === 'desert'){
     // 砂丘・サボテン・枯れ草
     spots(h, 4, {sep:.35, rMin:.5}).forEach(p =>
@@ -5591,9 +5551,16 @@ function addHexVisual(h, bins){
 // 装飾は形ごとに1つの InstancedMesh にまとめる
 // 地面に接する低い物だけ影を受ける（高い物まで受けると影が濁る）
 const BIN_GEO = {face: 'head'};
-const BIN_RECV = new Set(['bush', 'rock', 'pit', 'mine', 'kiln', 'brickPile', 'brickStack', 'stump']);
+const BIN_FLAT = new Set(['outcropA', 'outcropB', 'outcropC']);
+const BIN_LEAF = new Set(['broadleafLeaf', 'broadleaf2Leaf', 'broadleaf3Leaf']);
+const BIN_RECV = new Set(['bush', 'rock', 'pit', 'mine', 'kiln', 'brickPile', 'brickStack', 'stump',
+                          'outcropA', 'outcropB', 'outcropC']);
 function addAllInstanced(bins){
-  Object.keys(bins).forEach(k => addInstanced(GEO[BIN_GEO[k] || k], bins[k], BIN_RECV.has(k)));
+  Object.keys(bins).forEach(k => {
+    const im = addInstanced(GEO[BIN_GEO[k] || k], bins[k], BIN_RECV.has(k),
+                            BIN_LEAF.has(k) ? M.leaf : BIN_FLAT.has(k) ? M.decorFlat : M.decor);
+    if(im && BIN_LEAF.has(k)){ im.customDepthMaterial = M.leafDepth; im.receiveShadow = true; }
+  });
 }
 
 // 島の縁：浅瀬のにじみ、波打ち際、海から突き出す岩
@@ -5723,16 +5690,7 @@ function buildPorts(){
     boardGroup.add(sign);
 
     // 桟橋に舫った小舟。波で上下に揺れる
-    const boat = new THREE.Group();
-    const hull = new THREE.Mesh(GEO.hull, M.dock);
-    hull.scale.set(1, .8, .5);
-    const mast = new THREE.Mesh(GEO.mast, M.dockDark);
-    mast.position.y = .18;
-    const sail = new THREE.Mesh(GEO.sailP, M.sail);
-    sail.position.set(.05, .22, 0);
-    sail.rotation.y = Math.PI / 2;
-    boat.add(hull, mast, sail);
-    boat.traverse(o => { o.castShadow = true; });
+    const boat = makeShip({deck: M.dock, wood: M.dockDark, sail: M.sail, flag: M.sail, wake: false});
     boat.position.set(px + nx * .62 - nz * .52, -.24, pz + nz * .62 + nx * .52);
     boat.rotation.y = face + .35;
     boat.scale.setScalar(.72);
@@ -5742,13 +5700,44 @@ function buildPorts(){
 }
 
 /* --- 盗賊 --------------------------------------------------- */
+/* 頭巾をかぶった外套の男。裾の広がった外套、頭巾の奥の暗い顔と光る目、
+   赤い帯。組の原点は地面から .25 上（位置合わせは従来のまま）            */
 function makeRobber(){
   const g = new THREE.Group();
-  const body = new THREE.Mesh(GEO.rBody, M.robber); body.position.y = -.02;
-  const head = new THREE.Mesh(GEO.rHead, M.robber); head.position.y = .25;
-  const band = new THREE.Mesh(GEO.rBand, M.robberRim); band.position.y = -.21;
-  g.add(body, head, band);
-  g.traverse(o => { o.castShadow = true; });
+  const cloak = M.robCloak || (M.robCloak = new THREE.MeshStandardMaterial({color: 0x2c2b33, roughness: .82}));
+  const cloak2 = M.robCloak2 || (M.robCloak2 = new THREE.MeshStandardMaterial({color: 0x3a3842, roughness: .8}));
+  const dark = M.robFace || (M.robFace = new THREE.MeshBasicMaterial({color: 0x07070a}));
+  const eye = M.robEye || (M.robEye = new THREE.MeshBasicMaterial({color: 0xffc34a}));
+  const G0 = -.25;
+  const prof = [[0, 0], [.16, 0], [.172, .015], [.15, .07], [.118, .18], [.1, .27], [.092, .31], [.06, .335], [0, .34]]
+    .map(q => new THREE.Vector2(q[0], q[1]));
+  const body = new THREE.Mesh(new THREE.LatheGeometry(prof, 24), cloak);
+  body.position.y = G0;
+  // 外套のひだ：細い筋を縦に数本
+  for(let i = 0; i < 7; i++){
+    const a = i / 7 * 6.283 + .3;
+    const f = new THREE.Mesh(GEO.shipSpar || new THREE.CylinderGeometry(.008, .008, 1, 5), cloak2);
+    f.scale.set(1.4, .2, 1.4);
+    f.position.set(Math.cos(a) * .135, G0 + .1, Math.sin(a) * .135);
+    f.rotation.set(Math.sin(a) * -.2, 0, Math.cos(a) * .2);
+    g.add(f);
+  }
+  const sash = new THREE.Mesh(new THREE.CylinderGeometry(.106, .112, .03, 24), M.robberRim);
+  sash.position.y = G0 + .2;
+  const hood = new THREE.Mesh(new THREE.SphereGeometry(.09, 18, 12), cloak);
+  hood.scale.set(1, 1.12, 1.05); hood.position.y = G0 + .4;
+  const tip = new THREE.Mesh(new THREE.ConeGeometry(.05, .12, 12), cloak);
+  tip.position.set(0, G0 + .44, -.06); tip.rotation.x = -1.1;
+  const face = new THREE.Mesh(new THREE.SphereGeometry(.062, 16, 10), dark);
+  face.scale.set(1, 1.05, .6); face.position.set(0, G0 + .39, .05);
+  const e1 = new THREE.Mesh(new THREE.SphereGeometry(.009, 8, 6), eye);
+  e1.position.set(-.02, G0 + .4, .088);
+  const e2 = e1.clone(); e2.position.x = .02;
+  // 足もとの赤い輪（どのタイルにいるかを遠くからでも読めるように）
+  const band = new THREE.Mesh(GEO.rBand, M.robberRim); band.position.y = G0 + .025;
+  band.scale.set(1.05, .5, 1.05);
+  g.add(body, sash, hood, tip, face, e1, e2, band);
+  g.traverse(o => { if(o.material !== dark && o.material !== eye) o.castShadow = true; });
   return g;
 }
 
@@ -5965,23 +5954,147 @@ function addRoadMesh(e, p){
   spawnIn(m, TOP_Y + .04);
 }
 
+/* --- 船 -----------------------------------------------------
+   舳先は尖らせ、艫は平らに切って船尾楼を載せる。舳先には斜檣、
+   帆は前へ膨らませ、帆柱の吹き流しと航跡は後ろへ流す。
+   どちらが前かを、形・帆・旗・航跡の4つで読めるようにする。前は +X    */
+function makeHullGeo(L, W, H){
+  const s = new THREE.Shape(), hl = L / 2, hw = W / 2;
+  s.moveTo(-hl, -hw * .78);
+  s.lineTo(-hl * .55, -hw);
+  s.quadraticCurveTo(hl * .45, -hw * 1.02, hl, 0);
+  s.quadraticCurveTo(hl * .45, hw * 1.02, -hl * .55, hw);
+  s.lineTo(-hl, hw * .78);
+  s.lineTo(-hl, -hw * .78);
+  const g = new THREE.ExtrudeGeometry(s, {depth: H, bevelEnabled: false, curveSegments: 12, steps: 3});
+  g.rotateX(-Math.PI / 2);
+  const p = g.attributes.position;
+  for(let i = 0; i < p.count; i++){
+    const x = p.getX(i), y = p.getY(i), t = y / H;
+    // 船底はすぼめ、舳先と艫は反り上げる
+    p.setZ(i, p.getZ(i) * (.38 + .62 * t));
+    const rise = x > 0 ? Math.pow(x / hl, 2) * H * .55 : Math.pow(-x / hl, 3) * H * .25;
+    p.setY(i, y + rise * t);
+  }
+  g.computeVertexNormals();
+  return g;
+}
+function makeSailGeo(w, h, bulge){
+  const g = new THREE.PlaneGeometry(w, h, 8, 6);
+  const p = g.attributes.position;
+  for(let i = 0; i < p.count; i++){
+    const u = p.getX(i) / w + .5, v = p.getY(i) / h + .5;
+    p.setZ(i, Math.sin(Math.PI * u) * Math.sin(Math.PI * (v * .8 + .1)) * bulge);
+  }
+  g.rotateY(Math.PI / 2);          // 帆の面を船の幅方向に、膨らみを +X（前）へ
+  g.computeVertexNormals();
+  return g;
+}
+function makeWakeTex(){
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 128;
+  const x = c.getContext('2d');
+  // 右端（艫）から左へ開いていく2本の白い筋と、間の泡
+  for(let i = 0; i < 2; i++){
+    const g = x.createLinearGradient(256, 0, 0, 0);
+    g.addColorStop(0, 'rgba(255,255,255,.95)'); g.addColorStop(1, 'rgba(255,255,255,0)');
+    x.strokeStyle = g; x.lineWidth = 7; x.lineCap = 'round';
+    x.beginPath(); x.moveTo(250, 64); x.quadraticCurveTo(120, 64 + (i ? 22 : -22), 0, i ? 122 : 6); x.stroke();
+  }
+  const f = x.createLinearGradient(256, 0, 0, 0);
+  f.addColorStop(0, 'rgba(235,250,255,.55)'); f.addColorStop(1, 'rgba(235,250,255,0)');
+  x.fillStyle = f;
+  x.beginPath(); x.moveTo(256, 60); x.lineTo(0, 30); x.lineTo(0, 98); x.lineTo(256, 68); x.fill();
+  return new THREE.CanvasTexture(c);
+}
+function sailTex(stripe, dark, skull){
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const x = c.getContext('2d');
+  x.fillStyle = dark ? '#23262b' : '#efe7d6'; x.fillRect(0, 0, 128, 128);
+  // 帆布の継ぎ目
+  x.strokeStyle = dark ? 'rgba(255,255,255,.06)' : 'rgba(120,100,70,.18)'; x.lineWidth = 2;
+  for(let i = 1; i < 6; i++){ x.beginPath(); x.moveTo(i * 21, 0); x.lineTo(i * 21, 128); x.stroke(); }
+  if(stripe){ x.fillStyle = stripe; x.fillRect(0, 44, 128, 40); }
+  if(skull){
+    x.fillStyle = '#eae4d4';
+    x.beginPath(); x.arc(64, 56, 20, 0, 6.3); x.fill();
+    x.fillRect(52, 66, 24, 14);
+    x.fillStyle = '#23262b';
+    x.beginPath(); x.arc(56, 56, 6, 0, 6.3); x.arc(72, 56, 6, 0, 6.3); x.fill();
+    x.strokeStyle = '#eae4d4'; x.lineWidth = 7; x.lineCap = 'round';
+    x.beginPath(); x.moveTo(34, 88); x.lineTo(94, 112); x.moveTo(94, 88); x.lineTo(34, 112); x.stroke();
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.anisotropy = 4;
+  return t;
+}
+// opt: deck（上から見える甲板の材質）, sail, flag, wood, wake（航跡の有無）
+function makeShip(opt){
+  if(!GEO.shipHull){
+    GEO.shipHull = makeHullGeo(.46, .15, .085);
+    GEO.shipSail = makeSailGeo(.26, .22, .045);
+    GEO.shipTop  = makeSailGeo(.18, .1, .025);
+    GEO.shipSpar = new THREE.CylinderGeometry(.008, .008, 1, 5);
+    GEO.pennant  = new THREE.BufferGeometry();
+    GEO.pennant.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0, -.14, -.02, 0, 0, -.05, 0], 3));
+    GEO.pennant.computeVertexNormals();
+    GEO.wake = new THREE.PlaneGeometry(.62, .3).rotateX(-Math.PI / 2);
+    M.wake = new THREE.MeshBasicMaterial({map: makeWakeTex(), transparent: true, depthWrite: false, opacity: .8});
+  }
+  const wood = opt.wood || M.hull;
+  const g = new THREE.Group();
+  const hull = new THREE.Mesh(GEO.shipHull, [opt.deck, wood]);   // 上下の面＝甲板、側面＝船体
+  hull.position.y = .02;
+  // 船尾楼
+  const castle = new THREE.Mesh(GEO.deck, opt.deck);
+  castle.scale.set(.16, .6, .3); castle.position.set(-.175, .13, 0);
+  const rail = new THREE.Mesh(GEO.deck, wood);
+  rail.scale.set(.17, .25, .32); rail.position.set(-.175, .1, 0);
+  // 帆柱・帆桁・帆
+  const mast = new THREE.Mesh(GEO.shipSpar, wood);
+  mast.scale.y = .44; mast.position.set(.02, .3, 0);
+  const yard = new THREE.Mesh(GEO.shipSpar, wood);
+  yard.scale.y = .28; yard.rotation.x = Math.PI / 2; yard.position.set(.03, .39, 0);
+  const sail = new THREE.Mesh(GEO.shipSail, opt.sail);
+  sail.position.set(.03, .27, 0);
+  const top = new THREE.Mesh(GEO.shipTop, opt.sail);
+  top.position.set(.025, .45, 0);
+  // 斜檣（舳先から前へ突き出す）
+  const bow = new THREE.Mesh(GEO.shipSpar, wood);
+  bow.scale.y = .16; bow.rotation.z = -Math.PI / 2 + .35; bow.position.set(.27, .14, 0);
+  // 吹き流し：帆柱の先から後ろへ
+  const flag = new THREE.Mesh(GEO.pennant, opt.flag);
+  flag.position.set(.02, .53, 0);
+  g.add(hull, castle, rail, mast, yard, sail, top, bow, flag);
+  g.traverse(o => { o.castShadow = true; });
+  if(opt.wake !== false){
+    const wk = new THREE.Mesh(GEO.wake, M.wake);
+    wk.position.set(-.5, .012, 0);
+    wk.renderOrder = 3;
+    wk.castShadow = false;
+    g.add(wk);
+  }
+  return g;
+}
+// 持ち主ごとの帆（持ち主の色の帯）と旗
+function shipMatsFor(p){
+  const mt = playerMats(p);
+  if(!mt.sailShip){
+    mt.sailShip = new THREE.MeshStandardMaterial({map: sailTex('#' + new THREE.Color(p.color).getHexString()),
+                                                  side: THREE.DoubleSide, roughness: .9});
+    playerMatList.push(mt.sailShip);
+  }
+  return {deck: mt.body, sail: mt.sailShip, flag: mt.flag};
+}
+
 /* 船。辺の真ん中に浮かべ、辺の向きへ舳先を向ける。
    街道より背が高いので、海の上でも小さく埋もれない                    */
 function addShipMesh(e, p){
   const a = G.vertices[e.v[0]], b = G.vertices[e.v[1]];
   const x = (a.x + b.x) / 2, z = (a.z + b.z) / 2;
-  const g = new THREE.Group();
-  /* 真上から見るゲームなので、色は「上から見える面」に載せる。
-     帆を立てると真上からは紙一枚になって消えるため、船体を持ち主の色にする */
-  const hull = new THREE.Mesh(GEO.hull, playerMats(p).body);
-  hull.position.y = .07;
-  const mast = new THREE.Mesh(GEO.mast, M.hull);
-  mast.position.y = .10;
-  const sail = new THREE.Mesh(GEO.shipSail, M.sail);
-  sail.position.set(0, .34, 0);
-  sail.rotation.set(-Math.PI / 2.6, Math.PI / 2, 0);   // 上から見えるよう寝かせる
-  g.add(hull, mast, sail);
-  g.traverse(o => { o.castShadow = true; });
+  /* 真上寄りから見るゲームなので、持ち主の色は甲板（上から見える面）と帆の帯に載せる */
+  const g = makeShip(shipMatsFor(p));
   g.position.set(x, .01, z);
   g.rotation.y = -Math.atan2(b.z - a.z, b.x - a.x);
   boardGroup.add(g);
@@ -6000,19 +6113,17 @@ function removeShipMesh(e){
 
 /* 海賊。盗賊と同じ大きさで、色と形を変えて見分けられるようにする */
 function makePirate(){
+  // 黒い船体と、髑髏を描いた黒い帆
   const g = new THREE.Group();
-  const hull = new THREE.Mesh(GEO.hull, M.pirate);
-  hull.scale.set(1.35, 1.35, 1.35);
-  hull.position.y = .10;
-  const mast = new THREE.Mesh(GEO.mast, M.pirate);
-  mast.scale.set(1.3, 1.5, 1.3);
-  mast.position.y = .16;
-  const sail = new THREE.Mesh(GEO.shipSail, M.pirateRim);
-  sail.scale.set(1.35, 1.35, 1.35);
-  sail.position.set(0, .50, 0);
-  sail.rotation.set(-Math.PI / 2.6, Math.PI / 2, 0);
-  g.add(hull, mast, sail);
-  g.traverse(o => { o.castShadow = true; });
+  const ship = makeShip({
+    deck: M.pirateDeck || (M.pirateDeck = new THREE.MeshStandardMaterial({color: 0x3a2e26, roughness: .85})),
+    wood: M.pirate,
+    sail: M.pirateSail || (M.pirateSail = new THREE.MeshStandardMaterial({map: sailTex(null, true, true),
+                                                                          side: THREE.DoubleSide, roughness: .9})),
+    flag: M.pirateFlag || (M.pirateFlag = new THREE.MeshStandardMaterial({color: 0x9e2a1f, side: THREE.DoubleSide}))
+  });
+  ship.scale.setScalar(1.5);
+  g.add(ship);
   return g;
 }
 function updatePirateMesh(){
@@ -9172,13 +9283,7 @@ function addShipMeshX(s){
   /* この拡張では船が主役で、盤も広くカメラが遠い。
      航海者版と同じ大きさでは見失うので、船体だけ一回り大きくする
      （spawnIn が外側の拡縮を書き換えるので、内側の組で大きくする）  */
-  const body = new THREE.Group();
-  const hull = new THREE.Mesh(GEO.hull, playerMats(p).body); hull.position.y = .07;
-  const mast = new THREE.Mesh(GEO.mast, M.hull); mast.position.y = .10;
-  const sail = new THREE.Mesh(GEO.shipSail, M.sail);
-  sail.position.set(0, .34, 0);
-  sail.rotation.set(-Math.PI / 2.6, Math.PI / 2, 0);
-  body.add(hull, mast, sail);
+  const body = makeShip(shipMatsFor(p));
   body.scale.setScalar(1.45);
   g.add(body);
   g.traverse(o => { o.castShadow = true; });
