@@ -5285,13 +5285,26 @@ function addInstanced(geo, list, receive, mat){
    峰ごとの盛り上がりに稜線のノイズを掛け、斜面の傾きと高さで
    岩肌・岩陰・雪・裾のがれ場を塗り分ける。数字札と建物の場所は平らに残す */
 function addMountainMesh(h){
-  const N = 72, SZ = HEX_SIZE;
+  const N = 110, SZ = HEX_SIZE;
   const ridge = makeNoise(7), bump = makeNoise(19), tint = makeNoise(5);
-  // 峰は幅広く低めに置き、裾どうしを重ねて1つの山並みにつなげる（尖った円錐を並べない）
-  const peaks = spots(h, 7, {sep:.24, rMin:.56, corner:.36, shrink:.86}).map(p => ({
-    x: p[0] - h.x, z: p[1] - h.z, r: rr(.4, .55), hgt: rr(.26, .42)
-  }));
-  if(peaks.length) peaks[Math.floor(Math.random() * peaks.length)].hgt = rr(.52, .62);   // 主峰
+  /* 山並みは数字札の奥（初期の視点から見て向こう側、-Z）に1本の尾根として置き、
+     手前は低い丘だけにする。札を峰で囲むと火口のように見えるため。
+     峰は幅広く、裾どうしを重ねてつなげる（尖った円錐を並べない）            */
+  const peaks = [];
+  const nP = 7;
+  for(let i = 0; i < nP; i++){
+    const t = i / (nP - 1) - .5;                          // -0.5〜0.5：尾根の端から端
+    const a = -Math.PI / 2 + t * 2.5 + rr(-.12, .12);
+    const d = rr(.5, .66) + Math.abs(t) * .12;
+    const x = Math.cos(a) * d, z = Math.sin(a) * d;
+    if(HEX_CORNER.some(c => Math.hypot(c[0] - x, c[1] - z) < .3)) continue;
+    peaks.push({x, z, r: rr(.36, .5), hgt: rr(.3, .44) * (1 - Math.abs(t) * .5)});
+  }
+  // 主峰は札の真後ろ寄り
+  peaks.push({x: rr(-.12, .12), z: -rr(.52, .6), r: rr(.42, .5), hgt: rr(.56, .66)});
+  // 手前の小さな岩の丘
+  spots(h, 3, {sep:.3, rMin:.55, corner:.4, shrink:.84}).filter(p => p[1] > h.z + .15).forEach(p =>
+    peaks.push({x: p[0] - h.x, z: p[1] - h.z, r: rr(.2, .28), hgt: rr(.07, .12)}));
   const ridged = (u, v) => {
     let s = 0, amp = .5, f = 1, tot = 0;
     for(let i = 0; i < 4; i++){
@@ -5317,7 +5330,7 @@ function addMountainMesh(h){
       const rg = ridged(u, v);
       y = y * (.6 + .6 * rg) + .035 + (bump(u * 19, v * 19) - .5) * .03 + rg * .03;
       // 数字札・建物・街道の場所は平らに戻す
-      let m = clamp01((d - .44) / .12);
+      let m = clamp01((d - .38) / .1);
       let edge = 1;
       for(let k = 0; k < 6; k++) edge = Math.min(edge, (HEX_IN * .9 - (x * HEX_NORM[k][0] + z * HEX_NORM[k][1])) / .12);
       m *= clamp01(edge);
@@ -5440,9 +5453,9 @@ function tileDecor(h, bins){
   } else if(h.type === 'mountains'){
     // 岩山の起伏と、鉱石を運び出す坑口
     addMountainMesh(h);
-    spots(h, 1, {rMin:.55, corner:.45}).forEach(p => {
-      put('mine', p, rnd(.95, 1.1), -Math.atan2(p[1] - h.z, p[0] - h.x));
-    });
+    // 坑口は山の手前の麓に、手前を向けて置く
+    spots(h, 8, {rMin:.5, corner:.45}).filter(p => p[1] > h.z + .1).slice(0, 1).forEach(p =>
+      put('mine', p, rnd(.95, 1.1), -Math.atan2(p[1] - h.z, p[0] - h.x)));
     spots(h, 12, {sep:.12}).forEach(p => {
       const sz = rnd(.06, .12);
       pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.5, sz * 1.1, sz * 1.4, ang(), varyColor(0x6c7683, .02, .06, .14));
