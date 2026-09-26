@@ -5122,35 +5122,36 @@ function rockChunk(w, h, d, cuts, taper){
     const a = rr(0, 6.283), k = Math.sqrt(1 - up * up);
     planes.push({n: new THREE.Vector3(Math.cos(a) * k, up, Math.sin(a) * k), d: rr(.3, .44)});
   }
+  // 底は平らに切り、地面に据わるようにする（丸い底だと1点で接して浮いて見える）
+  const B0 = -.3;
   for(let i = 0; i < p.count; i++){
     v.fromBufferAttribute(p, i);
     planes.forEach(pl => { const t = v.dot(pl.n) - pl.d; if(t > 0) v.addScaledVector(pl.n, -t); });
-    const ty = v.y + .5;
+    if(v.y < B0) v.y = B0;
+    const ty = (v.y - B0) / (.5 - B0);
     const sc = 1 - (taper || 0) * ty;
-    p.setXYZ(i, v.x * w * sc, (v.y + .5) * h, v.z * d * sc);
+    p.setXYZ(i, v.x * w * sc, ty * h, v.z * d * sc);
   }
-  return roughen(g, Math.min(w, h, d) * .03);
+  return roughen(g, Math.min(w, h, d) * .03, {keepBase: true});
 }
 const ROCK_COLS = [0x8a796b, 0x7b6b5f, 0x968474, 0x6e5f55, 0x847468];
 function makeOutcropGeo(){
   const parts = [];
   const col = () => ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)];
-  // 低く横に広い岩塊を寄せて積む（縦長に立てると墓石や柱に見える）
-  parts.push(part(rockChunk(.28, .27, .24, 11, .38), col(), [-.01, -.03, -.02], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)]));
-  parts.push(part(rockChunk(.21, .19, .18, 10, .3), col(), [rr(-.14, -.1), -.02, rr(-.02, .05)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
-  parts.push(part(rockChunk(.19, .17, .17, 10, .3), col(), [rr(.09, .13), -.02, rr(-.05, .02)], [rr(-.15, .15), rr(0, 6.28), rr(-.15, .15)]));
-  // 上に載って少し傾いた平たい岩
-  parts.push(part(rockChunk(.17, .07, .13, 9, .1), col(), [rr(-.03, .04), .19, rr(-.03, .02)], [rr(-.2, .2), rr(0, 6.28), rr(-.25, .25)]));
-  // 手前の岩塊とこぼれた小石
+  // 大きな岩の塊を横に3つ並べ、上に平たい岩を載せる。X が長手（幅 .5 ほど、奥行き .34 ほど）
+  // 高さは幅より低く、上のすぼまりも弱くする（尖ると柱や塔に見える）
+  parts.push(part(rockChunk(.36, rr(.26, .3), .3, 12, .15), col(), [0, -.02, 0], [rr(-.06, .06), rr(0, 6.28), rr(-.06, .06)]));
+  parts.push(part(rockChunk(.27, rr(.18, .22), .24, 11, .12), col(), [-.15, -.02, rr(-.03, .03)], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)]));
+  parts.push(part(rockChunk(.25, rr(.15, .19), .22, 11, .12), col(), [.15, -.02, rr(-.03, .03)], [rr(-.08, .08), rr(0, 6.28), rr(-.08, .08)]));
+  parts.push(part(rockChunk(.22, .08, .17, 9, .05), col(), [rr(-.1, -.04), rr(.15, .18), 0], [rr(-.15, .15), rr(0, 6.28), rr(-.2, .2)]));
+  // 足もとの中くらいの岩と、少しの小石
   for(let i = 0; i < 5; i++){
-    const s = rr(.06, .1), a = rr(-1.2, 1.2) + Math.PI / 2, d = rr(.09, .14);
-    parts.push(part(rockChunk(s * rr(1.1, 1.5), s * rr(.7, 1), s * rr(.9, 1.2), 8, .2), col(),
-                    [Math.cos(a) * d, -.01, Math.sin(a) * d], [rr(-.2, .2), rr(0, 6.28), rr(-.2, .2)]));
+    const s = rr(.07, .11), x = rr(-.22, .22), z = (Math.random() < .5 ? -1 : 1) * rr(.1, .14);
+    parts.push(part(rockChunk(s * 1.3, s * .75, s * 1.1, 8, .1), col(), [x, -.01, z], [rr(-.1, .1), rr(0, 6.28), rr(-.1, .1)]));
   }
-  for(let i = 0; i < 9; i++){
-    const s = rr(.02, .04), a = rr(0, 6.28), d = rr(.12, .19);
-    parts.push(part(rockChunk(s * 1.3, s * .8, s, 6, .1), col(),
-                    [Math.cos(a) * d, -.005, Math.sin(a) * d], [rr(0, .6), rr(0, 6.28), rr(0, .6)]));
+  for(let i = 0; i < 6; i++){
+    const s = rr(.025, .045);
+    parts.push(part(rockChunk(s * 1.3, s * .8, s, 6, .1), col(), [rr(-.24, .24), -.005, rr(-.16, .16)], [rr(0, .6), rr(0, 6.28), rr(0, .6)]));
   }
   const g = mergeParts(parts);
   // 面の向きと割れ目で明暗をつける
@@ -5233,7 +5234,7 @@ function initProps(){
   M.leaf = new THREE.MeshStandardMaterial({map: leafTex, alphaTest: .5, side: THREE.DoubleSide,
                                           vertexColors: true, roughness: .8});
   M.leafDepth = new THREE.MeshDepthMaterial({depthPacking: THREE.RGBADepthPacking, map: leafTex, alphaTest: .5});
-  GEO.boulder   = mergeParts([part(rockChunk(1, .75, .85, 9, .25), 0xffffff)]);
+  GEO.boulder   = mergeParts([part(rockChunk(1, .6, .85, 9, .12), 0xffffff)]);
   GEO.outcropA  = makeOutcropGeo();
   GEO.outcropB  = makeOutcropGeo();
   GEO.outcropC  = makeOutcropGeo();
@@ -5363,6 +5364,17 @@ function fits(h, p, r, lim){
   return true;
 }
 
+// タイル内で物どうしが重ならないよう、置いた物の足もとの円を覚えておく
+function makeOcc(){
+  const list = [];
+  return {
+    free: (p, r) => list.every(o => Math.hypot(o.x - p[0], o.z - p[1]) >= o.r + r),
+    take: (p, r) => { list.push({x: p[0], z: p[1], r}); },
+    // 空いていれば場所を取って true
+    claim(p, r){ if(!this.free(p, r)) return false; this.take(p, r); return true; }
+  };
+}
+
 function tileDecor(h, bins){
   const rnd = (a, b) => a + Math.random() * (b - a);
   const ang = () => Math.random() * 6.2832;
@@ -5408,36 +5420,53 @@ function tileDecor(h, bins){
                new THREE.Color(Math.random() < .5 ? 0xfaf6e8 : 0xf0cc4a));
     });
   } else if(h.type === 'hills'){
-    // 粘土の採掘場：窯・積んだレンガ・掘り跡・粘土の山
-    spots(h, 8, {rMin:.58, corner:.42, shrink:.95}).filter(p => fits(h, p, .19, .95)).slice(0, 1).forEach(p => put('kiln', p, rnd(1, 1.15)));
+    // レンガ場：窯・積んだレンガ・地面のレンガ・乾いた草
+    const occ = makeOcc();
+    spots(h, 8, {rMin:.58, corner:.42, shrink:.95}).filter(p => fits(h, p, .19, .95)).slice(0, 1).forEach(p => {
+      occ.take(p, .2);
+      put('kiln', p, rnd(1, 1.15));
+    });
     // 札のまわりに寄せず、タイル全体に散らす
-    spots(h, 14, {sep:.2, rMin:.56, corner:.34, shrink:.95}).filter(p => fits(h, p, .14, .95)).forEach(p => put('brickPile', p, rnd(.75, 1)));
-    spots(h, 16, {sep:.09, rMin:.5, corner:.32, shrink:.93}).forEach(p => put('brickStack', p, rnd(.85, 1.15)));
-    spots(h, 3, {sep:.28}).forEach(p =>
-      pushInst(B(bins, 'pit'), p[0], TOP_Y + .004, p[1], rnd(.26, .36), 1, rnd(.2, .28), ang(), varyColor(0x6a2f1a, .02, .08, .08)));
-    spots(h, 6, {sep:.14}).forEach(p => bush(p[0], p[1], rnd(.1, .16), 1.8, .6, 0xa65634));
-    spots(h, 24, {sep:.07}).forEach(p => tuft(p, rnd(.6, .95), 0xa39a52));
+    spots(h, 16, {sep:.2, rMin:.56, corner:.34, shrink:.95})
+      .filter(p => fits(h, p, .14, .95) && occ.claim(p, .15)).forEach(p => put('brickPile', p, rnd(.75, 1)));
+    spots(h, 24, {sep:.09, rMin:.5, corner:.32, shrink:.93})
+      .filter(p => occ.claim(p, .06)).slice(0, 14).forEach(p => put('brickStack', p, rnd(.85, 1.15)));
+    spots(h, 40, {sep:.07}).filter(p => occ.free(p, .03)).slice(0, 24).forEach(p => tuft(p, rnd(.6, .95), 0xa39a52));
   } else if(h.type === 'mountains'){
-    // 岩だらけの地形：割れた石塊の露頭を数字札のまわりに寄せ、小石を散らす
-    // 岩の山は半径 .22 ほど。背を高くして量感を出し、枠からはみ出さない所だけに置く
-    spots(h, 16, {sep:.2, rMin:.46, corner:.3, shrink:.95}).forEach((p, i) => {
-      const sc = rnd(.9, 1.2);
-      if(!fits(h, p, .22 * sc, .95)) return;
-      const out = Math.atan2(p[1] - h.z, p[0] - h.x);
-      put(['outcropA', 'outcropB', 'outcropC'][i % 3], p, sc, -out - Math.PI / 2 + rnd(-.5, .5), tint(.1));
+    /* 岩だらけの地形。大きな岩の塊を、札とタイルの辺の間（6つの辺の方向）に
+       長手を横にして置く。1方向は坑口のために空ける。辺の方向は札から辺までが
+       最も狭いので、奥行き（半幅 .17）が札と枠の両方に掛からない距離に置く    */
+    const occ = makeOcc();
+    const skip = Math.floor(Math.random() * 6);
+    const rockC = () => new THREE.Color(ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)]).multiplyScalar(rnd(1, 1.2));
+    for(let k = 0; k < 6; k++){
+      if(k === skip) continue;
+      const out = Math.PI / 3 * k + rnd(-.12, .12), sc = rnd(.95, 1.1), d = rnd(.55, .58);
+      const p = [h.x + Math.cos(out) * d, h.z + Math.sin(out) * d];
+      occ.take(p, .2);
+      put(['outcropA', 'outcropB', 'outcropC'][k % 3], p, sc, -out - Math.PI / 2 + rnd(-.15, .15), tint(.1));
+    }
+    // 坑口は岩を置かなかった方向に、外を向けて置く
+    {
+      const out = Math.PI / 3 * skip, p = [h.x + Math.cos(out) * .52, h.z + Math.sin(out) * .52];
+      occ.take(p, .2);
+      put('mine', p, .95, -out);
+    }
+    // 角の方向（建物の場所の手前）にも一回り小さい岩の塊
+    for(let k = 0; k < 6; k++){
+      const a = Math.PI / 180 * (60 * k - 30) + rnd(-.1, .1), d = rnd(.6, .64);
+      const p = [h.x + Math.cos(a) * d, h.z + Math.sin(a) * d];
+      if(!occ.claim(p, .12)) continue;
+      put(['outcropA', 'outcropB', 'outcropC'][(k + 1) % 3], p, rnd(.62, .75), -a - Math.PI / 2 + rnd(-.3, .3), tint(.1));
+    }
+    // 残りの隙間を大きめの岩塊で埋める
+    spots(h, 40, {sep:.1, rMin:.42, corner:.3, shrink:.95}).forEach(p => {
+      const sz = rnd(.1, .17);
+      if(!fits(h, p, sz * .55, .95) || !occ.claim(p, sz * .5)) return;
+      pushInst(B(bins, 'boulder'), p[0], TOP_Y - .015, p[1], sz, sz * rnd(.8, 1.1), sz, ang(), rockC());
     });
-    // 外側には大きめの岩塊を1つずつ
-    spots(h, 20, {sep:.13, rMin:.55, corner:.3, shrink:.95}).forEach(p => {
-      const sz = rnd(.09, .16);
-      if(!fits(h, p, sz * .55, .95)) return;
-      pushInst(B(bins, 'boulder'), p[0], TOP_Y - .01, p[1], sz, sz * rnd(.8, 1.1), sz, ang(),
-               new THREE.Color(ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)]).multiplyScalar(rnd(1, 1.2)));
-    });
-    // 坑口は山の手前の麓に、手前を向けて置く
-    spots(h, 12, {rMin:.5, corner:.45}).filter(p => p[1] > h.z + .1 && fits(h, p, .24)).slice(0, 1).forEach(p =>
-      put('mine', p, rnd(.95, 1.1), -Math.atan2(p[1] - h.z, p[0] - h.x)));
-    spots(h, 30, {sep:.06, shrink:.92}).forEach(p => {
-      const sz = rnd(.03, .07);
+    spots(h, 14, {sep:.08, shrink:.92}).forEach(p => {
+      const sz = rnd(.03, .06);
       if(!fits(h, p, sz, .95)) return;
       pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.5, sz * 1.1, sz * 1.4, ang(), varyColor(0x8c7c70, .02, .08, .14));
     });
