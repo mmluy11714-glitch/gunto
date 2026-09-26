@@ -5112,8 +5112,8 @@ function makeCactusGeo(){
 }
 /* 割れた石塊。丸い塊を不規則な平面で何度も切り落とし、割れ面を作る。
    上をすぼめて傾け、柱や板のような整った形にしない                      */
-function rockChunk(w, h, d, cuts, taper){
-  const g = weld(new THREE.IcosahedronGeometry(.5, 2));
+function rockChunk(w, h, d, cuts, taper, detail){
+  const g = weld(new THREE.IcosahedronGeometry(.5, detail || 3));
   const p = g.attributes.position, v = new THREE.Vector3();
   const planes = [];
   for(let i = 0; i < (cuts || 9); i++){
@@ -5153,20 +5153,7 @@ function makeOutcropGeo(){
     const s = rr(.025, .045);
     parts.push(part(rockChunk(s * 1.3, s * .8, s, 6, .1), col(), [rr(-.24, .24), -.005, rr(-.16, .16)], [rr(0, .6), rr(0, 6.28), rr(0, .6)]));
   }
-  const g = mergeParts(parts);
-  // 面の向きと割れ目で明暗をつける
-  const pos = g.attributes.position, nor = g.attributes.normal, c = g.attributes.color;
-  g.computeBoundingBox();
-  const top = g.boundingBox.max.y || 1;
-  for(let i = 0; i < pos.count; i++){
-    const ny = nor.getY(i), x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-    let f = .72 + clamp01(ny) * .42 + clamp01(y / top) * .12;
-    const crack = Math.abs(Math.sin(x * 70 + Math.sin(y * 30) * 2 + z * 25));
-    if(crack < .1 && ny < .5) f *= .6;
-    if(jitterAt(x * 1e3, y * 1e3, z * 1e3, 11) > .38) f *= 1.12;          // 明るい斑
-    c.setXYZ(i, c.getX(i) * f, c.getY(i) * f, c.getZ(i) * f);
-  }
-  return g;
+  return shadeRock(mergeParts(parts));
 }
 
 /* 広葉樹。幹と枝、樹冠の芯（暗い塊）に、葉の絵を貼った板を何十枚も重ねる。
@@ -5215,6 +5202,45 @@ function makeLeafyTree(h, greens){
   }
   return {wood: mergeParts(wood, .6), leaf: mergeParts(leaves)};
 }
+// 面の向きと割れ目で明暗をつける（岩の模型の仕上げ）
+function shadeRock(g){
+  const pos = g.attributes.position, nor = g.attributes.normal, c = g.attributes.color;
+  g.computeBoundingBox();
+  const top = g.boundingBox.max.y || 1;
+  for(let i = 0; i < pos.count; i++){
+    const ny = nor.getY(i), x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    let f = .72 + clamp01(ny) * .42 + clamp01(y / top) * .12;
+    const crack = Math.abs(Math.sin(x * 70 + Math.sin(y * 30) * 2 + z * 25));
+    if(crack < .1 && ny < .5) f *= .6;
+    if(jitterAt(x * 1e3, y * 1e3, z * 1e3, 11) > .38) f *= 1.12;
+    c.setXYZ(i, c.getX(i) * f, c.getY(i) * f, c.getZ(i) * f);
+  }
+  return g;
+}
+/* 大きな岩の尾根。長さ .8 ほど（X が長手）、真ん中ほど高い。
+   大岩を横に連ねて割れ目でつなぎ、上に平たい岩、足もとに岩塊を寄せる     */
+function makeCragGeo(){
+  const parts = [], col = () => ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)];
+  // 太い塊を半分ずつ重ねて1つの岩山にする（細い塊を並べると立石の列に見える）
+  const n = 6;
+  for(let i = 0; i < n; i++){
+    const t = i / (n - 1) - .5, x = t * .56 + rr(-.02, .02);
+    const hh = (.3 - Math.abs(t) * .22) * rr(.9, 1.1);
+    parts.push(part(rockChunk(rr(.28, .34), hh, rr(.28, .34), 14, .22), col(),
+                    [x, -.02, rr(-.04, .04)], [rr(-.05, .05), rr(0, 6.28), rr(-.05, .05)]));
+  }
+  parts.push(part(rockChunk(.26, .09, .2, 10, .05), col(), [rr(-.12, .02), rr(.2, .24), 0], [rr(-.12, .12), rr(0, 6.28), rr(-.2, .2)]));
+  parts.push(part(rockChunk(.2, .08, .16, 10, .05), col(), [rr(.1, .18), rr(.13, .16), 0], [rr(-.12, .12), rr(0, 6.28), rr(-.2, .2)]));
+  for(let i = 0; i < 8; i++){
+    const s = rr(.07, .12), x = rr(-.36, .36), z = (i % 2 ? -1 : 1) * rr(.13, .17);
+    parts.push(part(rockChunk(s * 1.3, s * .75, s * 1.1, 10, .1), col(), [x, -.01, z], [rr(-.1, .1), rr(0, 6.28), rr(-.1, .1)]));
+  }
+  for(let i = 0; i < 8; i++){
+    const s = rr(.025, .045);
+    parts.push(part(rockChunk(s * 1.3, s * .8, s, 8, .1, 2), col(), [rr(-.4, .4), -.005, rr(-.19, .19)], [rr(0, .6), rr(0, 6.28), rr(0, .6)]));
+  }
+  return shadeRock(mergeParts(parts));
+}
 function initProps(){
   GEO.wheatClump = makeWheatGeo();
   GEO.hay       = makeHayGeo();
@@ -5235,6 +5261,9 @@ function initProps(){
                                           vertexColors: true, roughness: .8});
   M.leafDepth = new THREE.MeshDepthMaterial({depthPacking: THREE.RGBADepthPacking, map: leafTex, alphaTest: .5});
   GEO.boulder   = mergeParts([part(rockChunk(1, .6, .85, 9, .12), 0xffffff)]);
+  GEO.cragA     = makeCragGeo();
+  GEO.cragB     = makeCragGeo();
+  GEO.cragC     = makeCragGeo();
   GEO.outcropA  = makeOutcropGeo();
   GEO.outcropB  = makeOutcropGeo();
   GEO.outcropC  = makeOutcropGeo();
@@ -5433,31 +5462,31 @@ function tileDecor(h, bins){
       .filter(p => occ.claim(p, .06)).slice(0, 14).forEach(p => put('brickStack', p, rnd(.85, 1.15)));
     spots(h, 40, {sep:.07}).filter(p => occ.free(p, .03)).slice(0, 24).forEach(p => tuft(p, rnd(.6, .95), 0xa39a52));
   } else if(h.type === 'mountains'){
-    /* 岩だらけの地形。大きな岩の塊を、札とタイルの辺の間（6つの辺の方向）に
-       長手を横にして置く。1方向は坑口のために空ける。辺の方向は札から辺までが
-       最も狭いので、奥行き（半幅 .17）が札と枠の両方に掛からない距離に置く    */
+    /* 岩だらけの地形。1つおきの角の方向に長い岩の尾根（長さ .8 ほど）を
+       札に沿わせて置き、残りの角の方向に岩の塊と坑口を置く。
+       尾根は角の手前（建物の場所）と札の両方から離れる距離に置く          */
     const occ = makeOcc();
-    const skip = Math.floor(Math.random() * 6);
     const rockC = () => new THREE.Color(ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)]).multiplyScalar(rnd(1, 1.2));
+    const turn = Math.floor(Math.random() * 2), mineAt = Math.floor(Math.random() * 3);
     for(let k = 0; k < 6; k++){
-      if(k === skip) continue;
-      const out = Math.PI / 3 * k + rnd(-.12, .12), sc = rnd(.95, 1.1), d = rnd(.55, .58);
-      const p = [h.x + Math.cos(out) * d, h.z + Math.sin(out) * d];
-      occ.take(p, .2);
-      put(['outcropA', 'outcropB', 'outcropC'][k % 3], p, sc, -out - Math.PI / 2 + rnd(-.15, .15), tint(.1));
-    }
-    // 坑口は岩を置かなかった方向に、外を向けて置く
-    {
-      const out = Math.PI / 3 * skip, p = [h.x + Math.cos(out) * .52, h.z + Math.sin(out) * .52];
-      occ.take(p, .2);
-      put('mine', p, .95, -out);
-    }
-    // 角の方向（建物の場所の手前）にも一回り小さい岩の塊
-    for(let k = 0; k < 6; k++){
-      const a = Math.PI / 180 * (60 * k - 30) + rnd(-.1, .1), d = rnd(.6, .64);
-      const p = [h.x + Math.cos(a) * d, h.z + Math.sin(a) * d];
-      if(!occ.claim(p, .12)) continue;
-      put(['outcropA', 'outcropB', 'outcropC'][(k + 1) % 3], p, rnd(.62, .75), -a - Math.PI / 2 + rnd(-.3, .3), tint(.1));
+      const a = Math.PI / 180 * (60 * k - 30) + rnd(-.06, .06);
+      const at = d => [h.x + Math.cos(a) * d, h.z + Math.sin(a) * d];
+      if(k % 2 === turn){
+        const p = at(rnd(.51, .53));
+        occ.take(p, .3);
+        // 手前（カメラ側）の尾根は低くして、札を隠さない
+        const sc = rnd(1, 1.1), low = Math.sin(a) > .3 ? .7 : 1;
+        pushInst(B(bins, ['cragA', 'cragB', 'cragC'][k >> 1]), p[0], TOP_Y, p[1], sc, sc * low, sc,
+                 -a - Math.PI / 2 + rnd(-.08, .08), tint(.1));
+      } else if((k >> 1) === mineAt){
+        const p = at(.55);
+        occ.take(p, .2);
+        put('mine', p, 1, -a);
+      } else {
+        const p = at(.57);
+        occ.take(p, .22);
+        put(['outcropA', 'outcropB', 'outcropC'][k % 3], p, rnd(1, 1.12), -a - Math.PI / 2 + rnd(-.15, .15), tint(.1));
+      }
     }
     // 残りの隙間を大きめの岩塊で埋める
     spots(h, 40, {sep:.1, rMin:.42, corner:.3, shrink:.95}).forEach(p => {
@@ -5602,10 +5631,10 @@ function addHexVisual(h, bins){
 // 装飾は形ごとに1つの InstancedMesh にまとめる
 // 地面に接する低い物だけ影を受ける（高い物まで受けると影が濁る）
 const BIN_GEO = {face: 'head'};
-const BIN_FLAT = new Set(['outcropA', 'outcropB', 'outcropC', 'boulder']);
+const BIN_FLAT = new Set(['outcropA', 'outcropB', 'outcropC', 'boulder', 'cragA', 'cragB', 'cragC']);
 const BIN_LEAF = new Set(['broadleafLeaf', 'broadleaf2Leaf', 'broadleaf3Leaf']);
 const BIN_RECV = new Set(['bush', 'rock', 'pit', 'mine', 'kiln', 'brickPile', 'brickStack', 'stump',
-                          'outcropA', 'outcropB', 'outcropC', 'boulder']);
+                          'outcropA', 'outcropB', 'outcropC', 'boulder', 'cragA', 'cragB', 'cragC']);
 function addAllInstanced(bins){
   Object.keys(bins).forEach(k => {
     const im = addInstanced(GEO[BIN_GEO[k] || k], bins[k], BIN_RECV.has(k),
