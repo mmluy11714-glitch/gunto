@@ -6795,12 +6795,25 @@ function pinchDist(e){
   const [a, b] = e.touches;
   return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
 }
+// 2本指を結ぶ線の傾き。画面は下が正なので、増える向き＝時計回り
+function pinchAngle(e){
+  const [a, b] = e.touches;
+  return Math.atan2(b.clientY - a.clientY, b.clientX - a.clientX);
+}
+// ねじれの差。半回転を越えたときに飛ばないよう畳む
+function angDiff(now, was){
+  let d = now - was;
+  while(d > Math.PI) d -= Math.PI * 2;
+  while(d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
 
 let lastTap = {t: 0, x: 0, y: 0};     // ダブルタップの判定用
 function onDown(e){
   if(e.touches && e.touches.length === 2){
     const m = touchMid(e);
-    drag = {pinch: pinchDist(e), pd: pinchDist(e), dist: cam.dist, mx: m.x, my: m.y};
+    drag = {pinch: pinchDist(e), pd: pinchDist(e), pa: pinchAngle(e),
+            dist: cam.dist, mx: m.x, my: m.y};
     return;
   }
   const p = pointerPos(e);
@@ -6830,16 +6843,18 @@ function onMove(e){
   if(e.touches && e.touches.length === 2 && drag.pinch){
     const d = pinchDist(e);
     const m = touchMid(e);
-    // 2本指を平行に動かせば向きが変わる。つまめば寄り引きする
+    /* Google マップと同じ割り当て。
+       ねじる＝盤を回す／上下に動かす＝傾ける／横に動かす＝平行移動／つまむ＝寄り引き  */
+    const a = pinchAngle(e);
+    cam.theta += -1 * angDiff(a, drag.pa);
     const sign = (+CFG.invertY) ? -1 : 1;
-    cam.theta += (m.x - drag.mx) * .006;
     cam.phi = Math.min(1.42, Math.max(.28, cam.phi + (m.y - drag.my) * .005 * sign));
-    drag.mx = m.x; drag.my = m.y;
-    /* 寄り引きで注視点を動かすと、向きを変える操作と喧嘩して盤が流れる。
+    applyCamera();
+    panBy(drag.mx, drag.my, m.x, drag.my);        // 横のぶんだけ盤を動かす
+    /* 寄り引きで注視点を動かすと、回す操作と喧嘩して盤が流れる。
        指2本のときは注視点を固定したまま寄り引きする（移動は指1本でできる）  */
     if(d > 0) zoomTo(cam.dist * drag.pd / d);
-    drag.pd = d;
-    applyCamera();
+    drag.pd = d; drag.pa = a; drag.mx = m.x; drag.my = m.y;
     if(e.cancelable) e.preventDefault();
     return;
   }
