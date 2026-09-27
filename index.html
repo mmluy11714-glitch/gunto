@@ -6800,7 +6800,7 @@ let lastTap = {t: 0, x: 0, y: 0};     // ダブルタップの判定用
 function onDown(e){
   if(e.touches && e.touches.length === 2){
     const m = touchMid(e);
-    drag = {pinch: pinchDist(e), dist: cam.dist, mx: m.x, my: m.y};
+    drag = {pinch: pinchDist(e), pd: pinchDist(e), dist: cam.dist, mx: m.x, my: m.y};
     return;
   }
   const p = pointerPos(e);
@@ -6811,8 +6811,10 @@ function onDown(e){
   lastTap = {t: now, x: p.x, y: p.y};
   // 右ボタンと中ボタンは盤を平らに動かす（左は今までどおり向きを変える）
   const pan = !e.touches && (e.button === 1 || e.button === 2);
-  drag = {x: p.x, y: p.y, theta: cam.theta, phi: cam.phi,
-          moved: 0, sx: p.x, sy: p.y, zoom: dbl, pan, dist: cam.dist};
+  // 指1本は盤を平らに動かす。向きを変えるのは指2本（ダブルタップの寄り引きが優先）
+  const tpan = !!e.touches && !dbl;
+  drag = {x: p.x, y: p.y, theta: cam.theta, phi: cam.phi, moved: 0, sx: p.x, sy: p.y,
+          zoom: dbl, pan: pan || tpan, tpan, dist: cam.dist};
   if(pan && e.preventDefault) e.preventDefault();
 }
 // 画面上の (ax,ay) から (bx,by) へなぞったぶんだけ、盤を平らに動かす
@@ -6828,16 +6830,16 @@ function onMove(e){
   if(e.touches && e.touches.length === 2 && drag.pinch){
     const d = pinchDist(e);
     const m = touchMid(e);
-    // 2本指を平行に動かせば盤が動く。つまめば、つまんだ一点を軸に寄り引きする
-    const before = groundAt(drag.mx, drag.my);
-    const after = groundAt(m.x, m.y);
-    if(before && after){
-      cam.target.x = clampPan(cam.target.x + before.x - after.x);
-      cam.target.z = clampPan(cam.target.z + before.z - after.z);
-      applyCamera();
-    }
+    // 2本指を平行に動かせば向きが変わる。つまめば寄り引きする
+    const sign = (+CFG.invertY) ? -1 : 1;
+    cam.theta += (m.x - drag.mx) * .006;
+    cam.phi = Math.min(1.42, Math.max(.28, cam.phi + (m.y - drag.my) * .005 * sign));
     drag.mx = m.x; drag.my = m.y;
-    zoomTo(drag.dist * drag.pinch / d, m.x, m.y);
+    /* 寄り引きで注視点を動かすと、向きを変える操作と喧嘩して盤が流れる。
+       指2本のときは注視点を固定したまま寄り引きする（移動は指1本でできる）  */
+    if(d > 0) zoomTo(cam.dist * drag.pd / d);
+    drag.pd = d;
+    applyCamera();
     if(e.cancelable) e.preventDefault();
     return;
   }
@@ -6863,7 +6865,7 @@ function onMove(e){
    「盤を回した」と判定されて何も起きないことがあった                */
 const TAP_SLOP = () => (matchMedia('(pointer: coarse)').matches ? 14 : 6);
 function onUp(e){
-  if(drag && (drag.moved || 0) < TAP_SLOP() && !drag.pinch && !drag.zoom && !drag.pan){
+  if(drag && (drag.moved || 0) < TAP_SLOP() && !drag.pinch && !drag.zoom && (!drag.pan || drag.tpan)){
     const p = drag.sx !== undefined ? {x: drag.sx, y: drag.sy} : null;
     if(p) tryPick(p.x, p.y);
   }
