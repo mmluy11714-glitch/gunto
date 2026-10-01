@@ -7,6 +7,15 @@
 <!-- 部品は同じ場所の lib/ から読む（公開ページやLANのサーバーが置いている）。無いときだけ cdnjs から読む -->
 <script src="lib/three.min.js"></script>
 <script>window.THREE || document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');</script>
+<!-- 接地感（SSAO）用の後処理。無くても動く（無いときは通常の描画に戻る） -->
+<script src="lib/SimplexNoise.js"></script>
+<script src="lib/CopyShader.js"></script>
+<script src="lib/SSAOShader.js"></script>
+<script src="lib/Pass.js"></script>
+<script src="lib/EffectComposer.js"></script>
+<script src="lib/RenderPass.js"></script>
+<script src="lib/ShaderPass.js"></script>
+<script src="lib/SSAOPass.js"></script>
 <style>
   :root{
     --sea-deep:#0d3b52;
@@ -4306,6 +4315,80 @@ function freeOwned(){
   }
 }
 
+/* 接地感（SSAO）。後処理に入ると renderer.toneMapping が効かないので、最後の1枚で同じACESをかけ直す。
+   後処理の部品が読めなかったときは何もせず、通常の描画のまま */
+let composer = null, aoPass = null, finPass = null;
+const ACES_FINAL = {
+  uniforms: {tDiffuse: {value: null}, tDepth: {value: null}, exposure: {value: .75}, sat: {value: 1.4},
+             texel: {value: new THREE.Vector2(1 / 1280, 1 / 800)}, camNear: {value: .1}, camFar: {value: 200},
+             focus: {value: 14}, range: {value: 3.5}, blurMax: {value: 7}, bloom: {value: .22}, bloomCut: {value: .85}},
+  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+  fragmentShader: [
+    '#include <packing>',
+    'uniform sampler2D tDiffuse; uniform sampler2D tDepth; uniform float exposure, sat, camNear, camFar, focus, range, blurMax, bloom, bloomCut;',
+    'uniform vec2 texel; varying vec2 vUv;',
+    'float dist(vec2 uv){ float z = perspectiveDepthToViewZ(texture2D(tDepth, uv).x, camNear, camFar); return -z; }',
+    'float coc(vec2 uv){ return clamp((abs(dist(uv) - focus) - range) / 22.0, 0.0, 1.0); }',
+    'vec3 rrt(vec3 v){ vec3 a = v * (v + 0.0245786) - 0.000090537; vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081; return a / b; }',
+    'void main(){',
+    '  float c0 = coc(vUv);',
+    '  vec3 col = texture2D(tDiffuse, vUv).rgb;',
+    '  if(c0 > 0.01){',
+    '    vec3 acc = col; float wsum = 1.0;',
+    '    for(int i = 0; i < 20; i++){',
+    '      float f = float(i) + 1.0;',
+    '      float r = sqrt(f / 20.0) * c0 * blurMax; float a = f * 2.39996;',
+    '      vec2 uv = vUv + vec2(cos(a), sin(a)) * r * texel;',
+    '      float w = step(c0 * 0.55, coc(uv) + 0.001);',      // ピントの合った手前の物は背景に滲ませない
+    '      acc += texture2D(tDiffuse, uv).rgb * w; wsum += w;',
+    '    }',
+    '    col = acc / wsum;',
+    '  }',
+    '  vec3 glow = vec3(0.0);',
+    '  for(int i = 0; i < 14; i++){',
+    '    float f = float(i) + 1.0;',
+    '    float r = (3.0 + sqrt(f / 14.0) * 16.0); float a = f * 2.39996;',
+    '    vec3 t = texture2D(tDiffuse, vUv + vec2(cos(a), sin(a)) * r * texel).rgb * exposure;',
+    '    glow += max(t - vec3(bloomCut), 0.0);',
+    '  }',
+    '  col += glow / 14.0 * bloom * 4.0 / exposure;',
+    '  vec3 c = col * exposure / 0.6;',
+    '  c = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777) * c;',
+    '  c = rrt(c);',
+    '  c = mat3(1.60475, -0.10208, -0.00327, -0.53108, 1.10813, -0.07276, -0.07367, -0.00605, 1.07602) * c;',
+    '  c = clamp(c, 0.0, 1.0);',
+    '  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));',
+    '  c = clamp(vec3(l) + (c - vec3(l)) * sat, 0.0, 1.0);',
+    '  gl_FragColor = vec4(c, 1.0);',
+    '}'].join('\n')
+};
+const AO_CFG = {radius: 3, min: 0.001, max: 0.1};
+function setupAO(){
+  if(!(THREE.EffectComposer && THREE.SSAOPass && THREE.ShaderPass && THREE.CopyShader)) return;
+  const w = window.innerWidth, h = window.innerHeight;
+  // 白（1を超える明るさ）を8bitで潰さないよう、途中の画像は浮動小数で持つ
+  const hdr = () => ({minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType});
+  composer = new THREE.EffectComposer(renderer, new THREE.WebGLRenderTarget(w, h, hdr()));
+  aoPass = new THREE.SSAOPass(scene, camera, w, h);
+  // 後処理に入るとアンチエイリアスが外れて縁がギザギザになるので、シーンを描く画像だけマルチサンプルにする
+  if(renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget){
+    aoPass.beautyRenderTarget.dispose();
+    aoPass.beautyRenderTarget = new THREE.WebGLMultisampleRenderTarget(w, h, hdr());
+    aoPass.beautyRenderTarget.samples = 4;
+  }
+  aoPass.kernelRadius = AO_CFG.radius;
+  aoPass.minDistance = AO_CFG.min;
+  aoPass.maxDistance = AO_CFG.max;
+  composer.addPass(aoPass);
+  const fin = new THREE.ShaderPass(ACES_FINAL);
+  fin.renderToScreen = true;
+  finPass = fin;
+  fin.uniforms.tDepth.value = aoPass.normalRenderTarget.depthTexture;
+  fin.uniforms.camNear.value = camera.near; fin.uniforms.camFar.value = camera.far;
+  composer.addPass(fin);
+  renderer.toneMapping = THREE.NoToneMapping;
+}
+
 function initThree(){
   scene = new THREE.Scene();
   // 水平線が黒く抜けないよう、背景と霧を同じ色にして海に溶かす
@@ -4316,8 +4399,12 @@ function initThree(){
   renderer = new THREE.WebGLRenderer({antialias:true});
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  // 白飛びを抑えて写真に近い階調にする。露出を上げると色が淡くなりタイルの見分けが付きにくいので、1未満に絞る
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.75;
   document.getElementById('canvas-wrap').appendChild(renderer.domElement);
   scene.environment = makeSkyEnvironment();
+  setupAO();
 
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
@@ -4445,6 +4532,30 @@ function makeSkyEnvironment(){
   return tex;
 }
 
+let cloudShade = null;
+function makeCloudTexture(){
+  const c = document.createElement('canvas');
+  c.width = c.height = 256;
+  const x = c.getContext('2d');
+  // 継ぎ目が出ないよう、同じ図形を上下左右に回り込ませて描く
+  const blobs = [];
+  for(let i = 0; i < 14; i++) blobs.push([Math.random() * 256, Math.random() * 256, 30 + Math.random() * 46]);
+  for(let ox = -256; ox <= 256; ox += 256){
+    for(let oy = -256; oy <= 256; oy += 256){
+      blobs.forEach(b => {
+        const g = x.createRadialGradient(b[0] + ox, b[1] + oy, 0, b[0] + ox, b[1] + oy, b[2]);
+        g.addColorStop(0, 'rgba(255,255,255,.85)');
+        g.addColorStop(1, 'rgba(255,255,255,0)');
+        x.fillStyle = g;
+        x.beginPath(); x.arc(b[0] + ox, b[1] + oy, b[2], 0, 7); x.fill();
+      });
+    }
+  }
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(2.2, 2.2);
+  return t;
+}
 function buildSea(){
   /* 海の色は頂点色で持たせる。絵（map）の拡大を使うと、さざ波の法線の
      細かい繰り返しを同時に持てない（1枚の材質は拡大率を1つしか持てない） */
@@ -4461,8 +4572,8 @@ function buildSea(){
   wg.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
   const nt = canvasTex(waterNormalCanvas(), 22, 22);
   water = new THREE.Mesh(wg, new THREE.MeshStandardMaterial({
-    vertexColors: true, roughness: .3, metalness: .05,
-    normalMap: nt, normalScale: new THREE.Vector2(.18, .18), envMapIntensity: .8
+    vertexColors: true, roughness: .24, metalness: .05,
+    normalMap: nt, normalScale: new THREE.Vector2(.25, .25), envMapIntensity: .9
   }));
   water.position.y = -0.35;
   water.receiveShadow = false;   // 海面に島の影は落とさない
@@ -4471,12 +4582,22 @@ function buildSea(){
   const rg = new THREE.PlaneGeometry(120, 120, 1, 1);
   rg.rotateX(-Math.PI / 2);
   ripple = new THREE.Mesh(rg, new THREE.MeshBasicMaterial({
-    map: makeRippleTexture(), transparent: true, opacity: .06,
+    map: makeRippleTexture(), transparent: true, opacity: .1,
     depthWrite: false, blending: THREE.AdditiveBlending
   }));
   ripple.position.y = -0.33;
   ripple.renderOrder = 1;
   scene.add(ripple);
+
+  // 雲の影。海面にだけ落ちる柔らかい濃淡をゆっくり流す（島の下に敷くので盤には掛からない）
+  const cg = new THREE.PlaneGeometry(190, 190, 1, 1);
+  cg.rotateX(-Math.PI / 2);
+  cloudShade = new THREE.Mesh(cg, new THREE.MeshBasicMaterial({
+    map: makeCloudTexture(), transparent: true, opacity: .2, depthWrite: false, fog: false, color: 0x05202c
+  }));
+  cloudShade.position.y = -0.31;
+  cloudShade.renderOrder = 2;
+  scene.add(cloudShade);
 }
 
 /* --- 文字まわりのテクスチャ -------------------------------- */
@@ -4814,7 +4935,7 @@ function initMaterials(){
   // 地形の上面。色は絵の側に描き、凹凸も同じ絵から起こす
   const ground = (kind, rough) => {
     const t = canvasTex(groundCanvas(kind));
-    return new THREE.MeshStandardMaterial({color: 0xffffff, map: t, bumpMap: t, bumpScale: .018,
+    return new THREE.MeshStandardMaterial({color: 0xffffff, map: t, bumpMap: t, bumpScale: .03,
                                            roughness: rough || .95});
   };
   M.forest    = ground('forest');
@@ -5112,11 +5233,15 @@ function makeTuftGeo(){
   return mergeParts(parts, .55);
 }
 // 羊：もこもこの胴・黒い顔と耳・4本の脚。前は +X
+// 胴は小さな毛玉を表面に敷き詰める。毛玉の中心は胴の面から半径ぶん内へ沈めるので、突き出しはごくわずか。
+// 顔には目を入れない（小さい羊に目を付けると不気味になる）
 function makeSheepGeo(){
   const wool = roughen(weld(new THREE.SphereGeometry(.5, 12, 8)), .06);
+  const puff = new THREE.SphereGeometry(.5, 5, 3);
   const ball = new THREE.SphereGeometry(.5, 8, 6);
   const leg = new THREE.CylinderGeometry(.5, .5, 1, 5).translate(0, .5, 0);
   const dark = 0x2e2924, white = 0xf3f0e6;
+  const cols = [0xf6f3ea, 0xf0ece0, 0xf9f7f0, 0xece8da];
   const parts = [
     part(wool, white, [0, .105, 0], null, [.24, .15, .15]),
     part(wool, white, [.085, .155, 0], null, [.09, .08, .1]),       // 首まわりの毛
@@ -5125,6 +5250,18 @@ function makeSheepGeo(){
     part(ball, dark, [.11, .17, -.04], [-.5, 0, 0], [.03, .012, .045]),
     part(wool, white, [-.12, .12, 0], null, [.04, .04, .04])        // 尾
   ];
+  // 毛玉：胴の楕円体（半径 a,b,c）の表面の点から、法線方向へ r-突き出し だけ内へ沈める
+  const A = .12, B = .075, C = .075, CY = .105;
+  const N = 1100;
+  for(let i = 0; i < N; i++){
+    const th = i * 2.399 + rr(-.25, .25);                      // 黄金角で散らして偏りを避ける
+    const ph = Math.asin(1 - 2 * (i + .5) / N);                 // 球面を等面積で覆う（腹の下まで）
+    const px = A * Math.cos(ph) * Math.cos(th), py = B * Math.sin(ph), pz = C * Math.cos(ph) * Math.sin(th);
+    let nx = px / (A * A), ny = py / (B * B), nz = pz / (C * C);
+    const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
+    const r = rr(.016, .022), sink = r - rr(.002, .004);        // 突き出しは2〜4mm相当。重なってよい
+    parts.push(part(puff, cols[i % 4], [px - nx * sink, CY + py - ny * sink, pz - nz * sink], [rr(0, 3), rr(0, 3), 0], r * 2));
+  }
   [[.06, .04], [.06, -.04], [-.07, .04], [-.07, -.04]].forEach(q =>
     parts.push(part(leg, dark, [q[0], 0, q[1]], null, [.024, .055, .024])));
   return mergeParts(parts, .8);
@@ -5296,17 +5433,33 @@ function makeLeafyTree(h, greens){
   return {wood: mergeParts(wood, .6), leaf: mergeParts(leaves)};
 }
 // 面の向きと割れ目で明暗をつける（岩の模型の仕上げ）
+// 地層の縞（横）、上向きの面に苔、下ほど湿って暗く、割れ目は深く。色だけで質感を足す
 function shadeRock(g){
   const pos = g.attributes.position, nor = g.attributes.normal, c = g.attributes.color;
   g.computeBoundingBox();
   const top = g.boundingBox.max.y || 1;
+  const moss = new THREE.Color(0x5f7a3a);
   for(let i = 0; i < pos.count; i++){
     const ny = nor.getY(i), x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
-    let f = .72 + clamp01(ny) * .42 + clamp01(y / top) * .12;
+    const hr = clamp01(y / top);
+    let f = .7 + clamp01(ny) * .42 + hr * .12;
+    // 地層：横縞。うねらせ、縞ごとに明るさを少し変える
+    const strata = Math.sin(y * 85 + Math.sin(x * 14 + z * 9) * 1.4);
+    f *= .93 + strata * .07;
     const crack = Math.abs(Math.sin(x * 70 + Math.sin(y * 30) * 2 + z * 25));
-    if(crack < .1 && ny < .5) f *= .6;
+    if(crack < .1 && ny < .6) f *= .55;
     if(jitterAt(x * 1e3, y * 1e3, z * 1e3, 11) > .38) f *= 1.12;
-    c.setXYZ(i, c.getX(i) * f, c.getY(i) * f, c.getZ(i) * f);
+    // 下ほど湿って暗い
+    f *= .8 + .2 * clamp01(hr * 2.2);
+    let r = c.getX(i) * f, gg = c.getY(i) * f, bb = c.getZ(i) * f;
+    // 上向きの面（ほぼ水平）で、ある程度の高さから苔がむす。むらをつけて斑にする
+    const mossAmt = clamp01((ny - .55) * 3) * clamp01((hr - .25) * 3) *
+                    clamp01((jitterAt(x * 400, z * 400, y * 400, 5) - .35) * 3);
+    if(mossAmt > 0){
+      const k = mossAmt * .75, mv = .6 + f * .4;
+      r += (moss.r * mv - r) * k; gg += (moss.g * mv - gg) * k; bb += (moss.b * mv - bb) * k;
+    }
+    c.setXYZ(i, r, gg, bb);
   }
   return g;
 }
@@ -5839,6 +5992,62 @@ function buildShore(bins, only){
       });
     }
   });
+  buildFoam(only);
+}
+
+/* 波打ち際の泡。海に面した辺ごとに、外へ向かって薄れる泡の帯を敷く。
+   帯は島の中心から各頂点へ向かう向きで押し出すので、隣の辺と切れ目なくつながる。
+   全部を1枚のメッシュにまとめ、明るさだけを寄せては引く波のように揺らす（頂点は動かさない） */
+const FOAM = {list: [], tex: null};
+function makeFoamTexture(){
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 64;
+  const x = c.getContext('2d');
+  // 内側（画像の上＝v=1）ほど濃く、外へ薄れる泡つぶ。横は回り込ませて継ぎ目を消す
+  for(let i = 0; i < 520; i++){
+    const px = Math.random() * 256, py = Math.pow(Math.random(), 1.7) * 64;
+    const r = 1.2 + Math.random() * (5 - py * .05);
+    x.fillStyle = 'rgba(255,255,255,' + (.35 + Math.random() * .6) + ')';
+    for(const ox of [-256, 0, 256]){ x.beginPath(); x.arc(px + ox, py, r, 0, 7); x.fill(); }
+  }
+  x.globalCompositeOperation = 'destination-in';
+  const g = x.createLinearGradient(0, 0, 0, 64);
+  g.addColorStop(0, 'rgba(0,0,0,1)'); g.addColorStop(.55, 'rgba(0,0,0,.65)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+  x.fillStyle = g; x.fillRect(0, 0, 256, 64);
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = THREE.RepeatWrapping; t.wrapT = THREE.ClampToEdgeWrapping;
+  t.anisotropy = 4;
+  return t;
+}
+function buildFoam(only){
+  if(!G.islandCenter) return;
+  const pos = [], uv = [];
+  G.edges.filter(e => {
+    if(only && !e.hexes.some(i => only.has(i))) return false;
+    const hs = e.hexes.map(i => G.hexes[i]);
+    return hs.some(h => h.land && !h.hidden) && (hs.length === 1 || hs.some(h => !h.land || h.hidden));
+  }).forEach(e => {
+    const isle = e.hexes.map(i => G.hexes[i]).find(h => h.land && !h.hidden).island;
+    const a = G.vertices[e.v[0]], b = G.vertices[e.v[1]];
+    const na = outwardFrom(isle, a.x, a.z), nb = outwardFrom(isle, b.x, b.z);
+    const d0 = .05, d1 = .95, len = Math.hypot(b.x - a.x, b.z - a.z), rep = len / 3.6, y = -.29;   // 画像の横256画素が3.6、縦64画素が帯の幅.9にあたり、泡が丸く映る
+    const A0 = [a.x + na.nx * d0, y, a.z + na.nz * d0], B0 = [b.x + nb.nx * d0, y, b.z + nb.nz * d0];
+    const A1 = [a.x + na.nx * d1, y, a.z + na.nz * d1], B1 = [b.x + nb.nx * d1, y, b.z + nb.nz * d1];
+    pos.push(...A0, ...B0, ...B1, ...A0, ...B1, ...A1);
+    uv.push(0, 1, rep, 1, rep, 0, 0, 1, rep, 0, 0, 0);
+  });
+  if(!pos.length) return;
+  const g = own(new THREE.BufferGeometry());
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
+  const tex = own(makeFoamTexture());
+  const m = new THREE.Mesh(g, own(new THREE.MeshBasicMaterial({
+    map: tex, transparent: true, depthWrite: false, opacity: .7, fog: true
+  })));
+  m.renderOrder = 3;
+  m.frustumCulled = false;
+  boardGroup.add(m);
+  FOAM.list.push({m, ph: Math.random() * 6.28});
 }
 
 // 港：桟橋・杭・木札に加え、沖に小舟を1艘浮かべる
@@ -6136,10 +6345,29 @@ function replaceSettlementMesh(v, p){
 }
 
 // 街道。辺の長さは一定なのでジオメトリを1つ作って使い回す
+/* 道：角を丸めた板に、横木を何本か盛り上げて板張りの道に見せる。
+   色は材質（プレイヤー色）が持つので、形だけを作る（頂点色は使われない） */
+function makeRoadGeo(L){
+  const W = .155, H = .075, R = .04;
+  const sh = new THREE.Shape();
+  sh.moveTo(-L / 2 + R, -W / 2);
+  sh.lineTo(L / 2 - R, -W / 2); sh.quadraticCurveTo(L / 2, -W / 2, L / 2, -W / 2 + R);
+  sh.lineTo(L / 2, W / 2 - R);  sh.quadraticCurveTo(L / 2, W / 2, L / 2 - R, W / 2);
+  sh.lineTo(-L / 2 + R, W / 2); sh.quadraticCurveTo(-L / 2, W / 2, -L / 2, W / 2 - R);
+  sh.lineTo(-L / 2, -W / 2 + R); sh.quadraticCurveTo(-L / 2, -W / 2, -L / 2 + R, -W / 2);
+  const plank = new THREE.ExtrudeGeometry(sh, {depth: H - .02, bevelEnabled: true, bevelThickness: .01, bevelSize: .008, bevelSegments: 2, curveSegments: 5});
+  plank.rotateX(-Math.PI / 2);
+  plank.translate(0, -H / 2 + .01, 0);
+  const slat = new THREE.BoxGeometry(.034, .02, W + .016);
+  const parts = [part(plank, 0xffffff)];
+  const n = Math.max(3, Math.round(L / .16));
+  for(let i = 0; i < n; i++) parts.push(part(slat, 0xffffff, [(-.5 + (i + .5) / n) * (L - .08), H / 2 + .004, 0]));
+  return mergeParts(parts);
+}
 function addRoadMesh(e, p){
   const a = G.vertices[e.v[0]], b = G.vertices[e.v[1]];
   const len = Math.hypot(b.x - a.x, b.z - a.z);
-  if(!GEO.road) GEO.road = new THREE.BoxGeometry(len * .84, .09, .155);
+  if(!GEO.road) GEO.road = makeRoadGeo(len * .84);
   const m = new THREE.Mesh(GEO.road, playerMats(p).body);
   m.position.set((a.x + b.x) / 2, TOP_Y + .04, (a.z + b.z) / 2);
   m.rotation.y = -Math.atan2(b.z - a.z, b.x - a.x);
@@ -6635,6 +6863,12 @@ function resize(){
   const w = window.innerWidth, h = window.innerHeight;
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setSize(w, h);
+  if(composer){
+    composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(w, h);
+    // 画素の大きさ。ぼかしの半径を画面の大きさによらず同じ見た目にするため、基準の高さ800に対する比で持つ
+    const k = renderer.getPixelRatio() * Math.max(.6, Math.min(1.6, h / 800));
+    finPass.uniforms.texel.value.set(k / (w * renderer.getPixelRatio()), k / (h * renderer.getPixelRatio()));
+  }
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   fitCamera();
@@ -7066,6 +7300,7 @@ async function handlePick(d){
 }
 
 let prevT = 0;
+const _fd = new THREE.Vector3(), _fv = new THREE.Vector3();
 /* --- 環境の演出 ---------------------------------------------
    旗のはためき・煙突の煙・カモメ。見た目だけなので Math.random を使ってよい
    （進行には関わらない。ネット対戦でも端末ごとに違ってかまわない）。
@@ -7099,40 +7334,85 @@ function initAmbient(){
     scene.add(sp);
     AMB.puffs.push({sp, life: 0, dur: 1});
   }
-  // カモメ：胴と2枚の翼。盤の上を大きく回る
-  // 箱を組んだ形は積み木に見えるので、丸い胴と、後ろへ反った細い翼で鳥の輪郭にする
+  // カモメ：先細りの胴、くちばしと目のある頭、曲がった翼（付け根で上へ反り、先で下がる）と、
+  // 翼端に扇状に開いた初列風切の黒い羽。羽ばたきは翼ごとの付け根の回転だけ
   const white = new THREE.MeshLambertMaterial({color: 0xf7f7f2, side: THREE.DoubleSide});
-  const tip = new THREE.MeshLambertMaterial({color: 0x3e4349, side: THREE.DoubleSide});
+  const mantle = new THREE.MeshLambertMaterial({color: 0xc9cfd3, side: THREE.DoubleSide});
+  const tip = new THREE.MeshLambertMaterial({color: 0x34383d, side: THREE.DoubleSide});
   const beakM = new THREE.MeshLambertMaterial({color: 0xe8b23a});
-  const body = new THREE.SphereGeometry(.5, 12, 8);
-  // 翼の平面形（x が前、z が外側）。付け根は太く、先は細く後ろへ流す
-  const plane = pts => {
+  const eyeM = new THREE.MeshLambertMaterial({color: 0x15120e});
+  // 胴：丸い球を前後に伸ばし、尾へ向けて細くする
+  const body = new THREE.SphereGeometry(1, 16, 10);
+  {
+    const p = body.attributes.position;
+    for(let i = 0; i < p.count; i++){
+      const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
+      const taper = x < 0 ? 1 - .5 * Math.pow(-x, 1.4) : 1 - .12 * x;
+      p.setXYZ(i, x * (x < 0 ? .22 : .16), y * .05 * taper, z * .058 * taper);
+    }
+    body.computeVertexNormals();
+  }
+  const ball = new THREE.SphereGeometry(1, 10, 8);
+  const cone = new THREE.ConeGeometry(1, 1, 8).rotateZ(-Math.PI / 2).translate(.5, 0, 0);   // 先が +x
+  // 翼の面：前縁の点列から、後縁を弦長ぶん後ろへ引いた帯を張る（x が前、z が外側）
+  const wingStrip = (s0, s1, steps, mat) => {
     const pos = [];
-    for(let i = 1; i < pts.length - 1; i++) pos.push(...pts[0], ...pts[i], ...pts[i + 1]);
+    const pt = s => {
+      const z = .03 + s * .4;
+      const le = .05 - .09 * s * s;                       // 前縁は外へ行くほど後ろへ流れる
+      const chord = .15 * (1 - .78 * s);
+      const y = .07 * s * (1 - 1.35 * s);                 // 付け根で上へ、先で下がる
+      return [[le, y, z], [le - chord, y - .008 * (1 - s), z]];
+    };
+    for(let k = 0; k < steps; k++){
+      const a = pt(s0 + (s1 - s0) * k / steps), b = pt(s0 + (s1 - s0) * (k + 1) / steps);
+      pos.push(...a[0], ...a[1], ...b[0], ...a[1], ...b[1], ...b[0]);
+    }
     const g = new THREE.BufferGeometry();
     g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
     g.computeVertexNormals();
     return g;
   };
-  const wing = plane([[.05, 0, .02], [.07, .01, .12], [.045, .02, .24], [-.03, .01, .25], [-.06, 0, .12], [-.06, 0, .02]]);
-  const wtip = plane([[.045, .02, .24], [.0, .015, .36], [-.07, .005, .38], [-.03, .01, .25]]);
-  const tail = plane([[-.1, .005, 0], [-.19, 0, .045], [-.2, 0, -.045]]);
+  const wingInner = wingStrip(0, .66, 6);
+  // 初列風切：翼端から後ろ・外側へ扇状に開く細い羽
+  const feather = (ang, len) => {
+    const s = .66, z = .03 + s * .4, le = .05 - .09 * s * s, y = .07 * s * (1 - 1.35 * s);
+    const dx = -Math.sin(ang) * len, dz = Math.cos(ang) * len;
+    const w = .035;
+    const pos = [le, y, z, le - w * 1.6, y - .006, z, le + dx, y - .01, z + dz,
+                 le, y, z, le + dx, y - .01, z + dz, le + dx + w * .9, y - .008, z + dz - .005];
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    g.computeVertexNormals();
+    return g;
+  };
+  const feathers = [[.12, .2], [.32, .18], [.52, .16], [.72, .13], [.92, .11]].map(q => feather(q[0], q[1]));
+  const tail = new THREE.BufferGeometry();
+  tail.setAttribute('position', new THREE.Float32BufferAttribute([
+    -.13, .004, 0, -.27, 0, .055, -.29, 0, .0, -.13, .004, 0, -.29, 0, .0, -.27, 0, -.055], 3));
+  tail.computeVertexNormals();
   for(let i = 0; i < 3; i++){
     const g = new THREE.Group();
-    const b = new THREE.Mesh(body, white); b.scale.set(.26, .075, .085);
-    const head = new THREE.Mesh(body, white); head.scale.setScalar(.075); head.position.set(.13, .025, 0);
-    const beak = new THREE.Mesh(body, beakM); beak.scale.set(.05, .014, .014); beak.position.set(.185, .02, 0);
-    g.add(b, head, beak, new THREE.Mesh(tail, white));
+    g.add(new THREE.Mesh(body, white));
+    const head = new THREE.Mesh(ball, white); head.scale.set(.052, .046, .046); head.position.set(.17, .018, 0);
+    const beak = new THREE.Mesh(cone, beakM); beak.scale.set(.065, .017, .017); beak.position.set(.208, .008, 0);
+    beak.rotation.z = -.12;
+    g.add(head, beak, new THREE.Mesh(tail, white));
+    [-1, 1].forEach(sd => {
+      const e = new THREE.Mesh(ball, eyeM); e.scale.setScalar(.01); e.position.set(.19, .03, sd * .036);
+      g.add(e);
+    });
     const wings = [-1, 1].map(sd => {
       const pivot = new THREE.Group();
       pivot.scale.z = sd;                  // 左の翼は右の翼の鏡像
-      pivot.add(new THREE.Mesh(wing, white), new THREE.Mesh(wtip, tip));
+      pivot.add(new THREE.Mesh(wingInner, mantle));
+      feathers.forEach(f => pivot.add(new THREE.Mesh(f, tip)));
       g.add(pivot);
       return {pivot, sd};
     });
     g.traverse(o => { o.castShadow = true; });
     scene.add(g);
-    g.scale.setScalar(.62);
+    g.scale.setScalar(.8);
     AMB.gulls.push({g, wings, r: 5.2 + i * 1.1 + Math.random() * .6, h: 2.7 + i * .35, sp: (.10 + Math.random() * .05) * (i % 2 ? -1 : 1),
                     a: Math.random() * 6.28, ph: Math.random() * 6.28, cx: 0, cz: 0});
   }
@@ -7218,6 +7498,18 @@ function animate(t){
     o.x = (t * .0000105) % 1;
     o.y = (t * .0000072) % 1;
   }
+  for(let i = FOAM.list.length - 1; i >= 0; i--){
+    const f = FOAM.list[i];
+    if(!f.m.parent){ FOAM.list.splice(i, 1); continue; }
+    const wv = Math.sin(t / 1250 + f.ph);                   // 寄せては引く
+    f.m.material.opacity = .85 + wv * .15;
+    f.m.material.map.offset.x = (t * .00004) % 1;
+  }
+  if(cloudShade){
+    const o = cloudShade.material.map.offset;
+    o.x = (t * .0000042) % 1;
+    o.y = (t * .0000021) % 1;
+  }
   if(water && water.material.normalMap){
     const o = water.material.normalMap.offset;
     o.x = (t * .0000062) % 1;
@@ -7230,7 +7522,15 @@ function animate(t){
     b.obj.rotation.z = Math.sin(t / 1150 + b.ph) * .07;
   }
   ambientStep(t, Math.min(dt2, .05));
-  renderer.render(scene, camera);
+  if(composer){
+    if(finPass && G && G.hexes){
+      const c = AMB.center || (AMB.center = boardCenter());
+      _fd.set(c.x - camera.position.x, 0 - camera.position.y, c.z - camera.position.z);
+      camera.getWorldDirection(_fv);
+      finPass.uniforms.focus.value = Math.max(2, _fd.dot(_fv));
+    }
+    composer.render();
+  } else renderer.render(scene, camera);
 }
 
 /* ============================================================
