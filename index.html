@@ -4320,39 +4320,23 @@ function freeOwned(){
    後処理の部品が読めなかったときは何もせず、通常の描画のまま */
 let composer = null, aoPass = null, finPass = null;
 const ACES_FINAL = {
-  uniforms: {tDiffuse: {value: null}, tDepth: {value: null}, exposure: {value: .75}, sat: {value: 1.4},
-             texel: {value: new THREE.Vector2(1 / 1280, 1 / 800)}, camNear: {value: .1}, camFar: {value: 200},
-             focus: {value: 14}, range: {value: 3.5}, blurMax: {value: 7}, bloom: {value: .22}, bloomCut: {value: .85}},
+  uniforms: {tDiffuse: {value: null}, exposure: {value: .75}, sat: {value: 1.4},
+             texel: {value: new THREE.Vector2(1 / 1280, 1 / 800)}, bloom: {value: .22}, bloomCut: {value: .85}},
   vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
   fragmentShader: [
-    '#include <packing>',
-    'uniform sampler2D tDiffuse; uniform sampler2D tDepth; uniform float exposure, sat, camNear, camFar, focus, range, blurMax, bloom, bloomCut;',
+    'uniform sampler2D tDiffuse; uniform float exposure, sat, bloom, bloomCut;',
     'uniform vec2 texel; varying vec2 vUv;',
-    'float dist(vec2 uv){ float z = perspectiveDepthToViewZ(texture2D(tDepth, uv).x, camNear, camFar); return -z; }',
-    'float coc(vec2 uv){ return clamp((abs(dist(uv) - focus) - range) / 22.0, 0.0, 1.0); }',
     'vec3 rrt(vec3 v){ vec3 a = v * (v + 0.0245786) - 0.000090537; vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081; return a / b; }',
     'void main(){',
-    '  float c0 = coc(vUv);',
     '  vec3 col = texture2D(tDiffuse, vUv).rgb;',
-    '  if(c0 > 0.01){',
-    '    vec3 acc = col; float wsum = 1.0;',
-    '    for(int i = 0; i < 20; i++){',
-    '      float f = float(i) + 1.0;',
-    '      float r = sqrt(f / 20.0) * c0 * blurMax; float a = f * 2.39996;',
-    '      vec2 uv = vUv + vec2(cos(a), sin(a)) * r * texel;',
-    '      float w = step(c0 * 0.55, coc(uv) + 0.001);',      // ピントの合った手前の物は背景に滲ませない
-    '      acc += texture2D(tDiffuse, uv).rgb * w; wsum += w;',
-    '    }',
-    '    col = acc / wsum;',
-    '  }',
     '  vec3 glow = vec3(0.0);',
-    '  for(int i = 0; i < 14; i++){',
+    '  for(int i = 0; i < 8; i++){',
     '    float f = float(i) + 1.0;',
-    '    float r = (3.0 + sqrt(f / 14.0) * 16.0); float a = f * 2.39996;',
+    '    float r = (3.0 + sqrt(f / 8.0) * 16.0); float a = f * 2.39996;',
     '    vec3 t = texture2D(tDiffuse, vUv + vec2(cos(a), sin(a)) * r * texel).rgb * exposure;',
     '    glow += max(t - vec3(bloomCut), 0.0);',
     '  }',
-    '  col += glow / 14.0 * bloom * 4.0 / exposure;',
+    '  col += glow / 8.0 * bloom * 4.0 / exposure;',
     '  vec3 c = col * exposure / 0.6;',
     '  c = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777) * c;',
     '  c = rrt(c);',
@@ -4384,8 +4368,7 @@ function setupAO(){
   const fin = new THREE.ShaderPass(ACES_FINAL);
   fin.renderToScreen = true;
   finPass = fin;
-  fin.uniforms.tDepth.value = aoPass.normalRenderTarget.depthTexture;
-  fin.uniforms.camNear.value = camera.near; fin.uniforms.camFar.value = camera.far;
+
   composer.addPass(fin);
   renderer.toneMapping = THREE.NoToneMapping;
 }
@@ -5689,7 +5672,7 @@ function tileDecor(h, bins){
     spots(h, 3, {sep:.26, rMin:.5, corner:.4, shrink:.92}).forEach(p => put('hay', p, rnd(.9, 1.1), dir + rnd(-.3, .3)));
   } else if(h.type === 'pasture'){
     // 羊・柵・草の株・花
-    spots(h, 11, {sep:.2}).forEach(p => put('sheep2', p, rnd(.75, 1.05), undefined, tint(.06)));
+    spots(h, 7, {sep:.2}).forEach(p => put('sheep2', p, rnd(.75, 1.05), undefined, tint(.06)));
     spots(h, 6, {sep:.5, rMin:.6, corner:.45, shrink:.78}).filter(p => fits(h, p, .26)).slice(0, 2).forEach(p => put('fence', p, 1));
     spots(h, 20, {sep:.11}).forEach(p => tuft(p, rnd(.85, 1.4), 0x5f9a34));
     spots(h, 9, {sep:.13}).forEach(p => bush(p[0], p[1], rnd(.07, .13), 1.6, .9, 0x3f7a2a));
@@ -7248,7 +7231,6 @@ async function handlePick(d){
 }
 
 let prevT = 0;
-const _fd = new THREE.Vector3(), _fv = new THREE.Vector3();
 /* --- 環境の演出 ---------------------------------------------
    旗のはためき・煙突の煙・カモメ。見た目だけなので Math.random を使ってよい
    （進行には関わらない。ネット対戦でも端末ごとに違ってかまわない）。
@@ -7464,12 +7446,6 @@ function animate(t){
   }
   ambientStep(t, Math.min(dt2, .05));
   if(composer){
-    if(finPass && G && G.hexes){
-      const c = AMB.center || (AMB.center = boardCenter());
-      _fd.set(c.x - camera.position.x, 0 - camera.position.y, c.z - camera.position.z);
-      camera.getWorldDirection(_fv);
-      finPass.uniforms.focus.value = Math.max(2, _fd.dot(_fv));
-    }
     composer.render();
   } else renderer.render(scene, camera);
 }
