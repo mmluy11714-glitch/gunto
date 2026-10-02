@@ -4364,6 +4364,15 @@ function setupAO(){
   aoPass.kernelRadius = AO_CFG.radius;
   aoPass.minDistance = AO_CFG.min;
   aoPass.maxDistance = AO_CFG.max;
+  /* 海面は平らで陰を落とす相手ではない。奥行きの粗い画像（16bit）に平らな広い面が入ると、
+     実機のGPUで画面を横切る縞（線）が出るので、陰影の計算の間だけ海面と波・雲の板を隠す */
+  const aoOverride = aoPass.renderOverride.bind(aoPass);
+  aoPass.renderOverride = function(r, mat, rt, cc, ca){
+    const hid = [water, ripple, cloudShade].filter(o => o && o.visible);
+    hid.forEach(o => { o.visible = false; });
+    aoOverride(r, mat, rt, cc, ca);
+    hid.forEach(o => { o.visible = true; });
+  };
   composer.addPass(aoPass);
   const fin = new THREE.ShaderPass(ACES_FINAL);
   fin.renderToScreen = true;
