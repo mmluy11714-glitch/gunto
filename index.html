@@ -8,15 +8,6 @@
 <!-- 部品は同じ場所の lib/ から読む（公開ページやLANのサーバーが置いている）。無いときだけ cdnjs から読む -->
 <script src="lib/three.min.js"></script>
 <script>window.THREE || document.write('<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"><\/script>');</script>
-<!-- 接地感（SSAO）用の後処理。無くても動く（無いときは通常の描画に戻る） -->
-<script src="lib/SimplexNoise.js"></script>
-<script src="lib/CopyShader.js"></script>
-<script src="lib/SSAOShader.js"></script>
-<script src="lib/Pass.js"></script>
-<script src="lib/EffectComposer.js"></script>
-<script src="lib/RenderPass.js"></script>
-<script src="lib/ShaderPass.js"></script>
-<script src="lib/SSAOPass.js"></script>
 <style>
   :root{
     --sea-deep:#0d3b52;
@@ -4302,7 +4293,7 @@ function neededResource(p){
 let scene, camera, renderer, raycaster, pointer;
 let boardGroup, pickGroup, robberMesh, pirateMesh;
 let pickables = [];
-let water, ripple, diceGroup;
+let water, diceGroup;
 const bobbers = [];          // 波で上下させる小物（小舟）
 
 // buildScene() のたびに作り直す資源。次の構築前にまとめて解放する。
@@ -4314,72 +4305,6 @@ function freeOwned(){
     const o = owned.pop();
     if(o && o.dispose) o.dispose();
   }
-}
-
-/* 接地感（SSAO）。後処理に入ると renderer.toneMapping が効かないので、最後の1枚で同じACESをかけ直す。
-   後処理の部品が読めなかったときは何もせず、通常の描画のまま */
-let composer = null, aoPass = null, finPass = null;
-const ACES_FINAL = {
-  uniforms: {tDiffuse: {value: null}, exposure: {value: .75}, sat: {value: 1.4},
-             texel: {value: new THREE.Vector2(1 / 1280, 1 / 800)}, bloom: {value: .22}, bloomCut: {value: .85}},
-  vertexShader: 'varying vec2 vUv; void main(){ vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: [
-    'uniform sampler2D tDiffuse; uniform float exposure, sat, bloom, bloomCut;',
-    'uniform vec2 texel; varying vec2 vUv;',
-    'vec3 rrt(vec3 v){ vec3 a = v * (v + 0.0245786) - 0.000090537; vec3 b = v * (0.983729 * v + 0.4329510) + 0.238081; return a / b; }',
-    'void main(){',
-    '  vec3 col = texture2D(tDiffuse, vUv).rgb;',
-    '  vec3 glow = vec3(0.0);',
-    '  for(int i = 0; i < 8; i++){',
-    '    float f = float(i) + 1.0;',
-    '    float r = (3.0 + sqrt(f / 8.0) * 16.0); float a = f * 2.39996;',
-    '    vec3 t = texture2D(tDiffuse, vUv + vec2(cos(a), sin(a)) * r * texel).rgb * exposure;',
-    '    glow += max(t - vec3(bloomCut), 0.0);',
-    '  }',
-    '  col += glow / 8.0 * bloom * 4.0 / exposure;',
-    '  vec3 c = col * exposure / 0.6;',
-    '  c = mat3(0.59719, 0.07600, 0.02840, 0.35458, 0.90834, 0.13383, 0.04823, 0.01566, 0.83777) * c;',
-    '  c = rrt(c);',
-    '  c = mat3(1.60475, -0.10208, -0.00327, -0.53108, 1.10813, -0.07276, -0.07367, -0.00605, 1.07602) * c;',
-    '  c = clamp(c, 0.0, 1.0);',
-    '  float l = dot(c, vec3(0.2126, 0.7152, 0.0722));',
-    '  c = clamp(vec3(l) + (c - vec3(l)) * sat, 0.0, 1.0);',
-    '  gl_FragColor = vec4(c, 1.0);',
-    '}'].join('\n')
-};
-const AO_CFG = {radius: 3, min: 0.001, max: 0.1};
-function setupAO(){
-  if(!(THREE.EffectComposer && THREE.SSAOPass && THREE.ShaderPass && THREE.CopyShader)) return;
-  const w = window.innerWidth, h = window.innerHeight;
-  // 白（1を超える明るさ）を8bitで潰さないよう、途中の画像は浮動小数で持つ
-  const hdr = () => ({minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter, format: THREE.RGBAFormat, type: THREE.HalfFloatType});
-  composer = new THREE.EffectComposer(renderer, new THREE.WebGLRenderTarget(w, h, hdr()));
-  aoPass = new THREE.SSAOPass(scene, camera, w, h);
-  // 後処理に入るとアンチエイリアスが外れて縁がギザギザになるので、シーンを描く画像だけマルチサンプルにする
-  if(renderer.capabilities.isWebGL2 && THREE.WebGLMultisampleRenderTarget){
-    aoPass.beautyRenderTarget.dispose();
-    aoPass.beautyRenderTarget = new THREE.WebGLMultisampleRenderTarget(w, h, hdr());
-    aoPass.beautyRenderTarget.samples = 4;
-  }
-  aoPass.kernelRadius = AO_CFG.radius;
-  aoPass.minDistance = AO_CFG.min;
-  aoPass.maxDistance = AO_CFG.max;
-  /* 海面は平らで陰を落とす相手ではない。奥行きの粗い画像（16bit）に平らな広い面が入ると、
-     実機のGPUで画面を横切る縞（線）が出るので、陰影の計算の間だけ海面と波・雲の板を隠す */
-  const aoOverride = aoPass.renderOverride.bind(aoPass);
-  aoPass.renderOverride = function(r, mat, rt, cc, ca){
-    const hid = [water, ripple, cloudShade].filter(o => o && o.visible);
-    hid.forEach(o => { o.visible = false; });
-    aoOverride(r, mat, rt, cc, ca);
-    hid.forEach(o => { o.visible = true; });
-  };
-  composer.addPass(aoPass);
-  const fin = new THREE.ShaderPass(ACES_FINAL);
-  fin.renderToScreen = true;
-  finPass = fin;
-
-  composer.addPass(fin);
-  renderer.toneMapping = THREE.NoToneMapping;
 }
 
 function initThree(){
@@ -4397,7 +4322,9 @@ function initThree(){
   renderer.toneMappingExposure = 0.75;
   document.getElementById('canvas-wrap').appendChild(renderer.domElement);
   scene.environment = makeSkyEnvironment();
-  setupAO();
+  /* 後処理（SSAO・ブルーム）は使わない。スマホ実機で海に横線や四角い枠が出て、重さの割に効果が小さかったので外した。
+     階調は renderer.toneMapping（ACES）、彩度は画面側のフィルターで足す */
+  renderer.domElement.style.filter = 'saturate(1.4)';
 
   raycaster = new THREE.Raycaster();
   pointer = new THREE.Vector2();
@@ -4410,7 +4337,7 @@ function initThree(){
   sun.castShadow = true;
   // 影の輪郭が階段状に見えないよう、画面の広い端末だけ解像度を上げる
   const big = Math.min(window.innerWidth, window.innerHeight) >= 700;
-  sun.shadow.mapSize.set(big ? 4096 : 2048, big ? 4096 : 2048);
+  sun.shadow.mapSize.set(big ? 2048 : 1024, big ? 2048 : 1024);
   sun.shadow.radius = 3;
   const d = 12;
   sun.shadow.camera.left = -d; sun.shadow.camera.right = d;
@@ -4467,35 +4394,6 @@ function makeSeaTexture(){
   t.repeat.set(SPAN, SPAN);
   t.offset.set(-(SPAN - 1) / 2, -(SPAN - 1) / 2);
   t.anisotropy = 4;
-  return t;
-}
-
-// さざ波。継ぎ目が出ないよう同じ図形を上下左右に回り込ませて描く
-function makeRippleTexture(){
-  const c = document.createElement('canvas');
-  c.width = c.height = 256;
-  const x = c.getContext('2d');
-  x.strokeStyle = 'rgba(255,255,255,.55)';
-  const shapes = [];
-  for(let i = 0; i < 60; i++){
-    shapes.push([Math.random() * 256, Math.random() * 256,
-                 9 + Math.random() * 30, 1.6 + Math.random() * 3,
-                 (Math.random() - .5) * .7, .7 + Math.random() * 1.1]);
-  }
-  for(let ox = -256; ox <= 256; ox += 256){
-    for(let oy = -256; oy <= 256; oy += 256){
-      shapes.forEach(s => {
-        x.lineWidth = s[5];
-        x.beginPath();
-        if(x.ellipse) x.ellipse(s[0] + ox, s[1] + oy, s[2], s[3], s[4], 0, 6.284);
-        else x.arc(s[0] + ox, s[1] + oy, s[3], 0, 6.284);
-        x.stroke();
-      });
-    }
-  }
-  const t = new THREE.CanvasTexture(c);
-  t.wrapS = t.wrapT = THREE.RepeatWrapping;
-  t.repeat.set(67, 67);
   return t;
 }
 
@@ -4572,15 +4470,7 @@ function buildSea(){
   water.receiveShadow = false;   // 海面に島の影は落とさない
   scene.add(water);
 
-  const rg = new THREE.PlaneGeometry(400, 400, 1, 1);
-  rg.rotateX(-Math.PI / 2);
-  ripple = new THREE.Mesh(rg, new THREE.MeshBasicMaterial({
-    map: makeRippleTexture(), transparent: true, opacity: .1,
-    depthWrite: false, blending: THREE.AdditiveBlending
-  }));
-  ripple.position.y = -0.33;
-  ripple.renderOrder = 1;
-  scene.add(ripple);
+  // 白い楕円の「さざ波」の層は、近くで見ると短い白線に見えるので置かない（波の動きは海面の法線で出る）
 
   // 雲の影。海面にだけ落ちる柔らかい濃淡をゆっくり流す（島の下に敷くので盤には掛からない）
   const cg = new THREE.PlaneGeometry(600, 600, 1, 1);
@@ -6801,14 +6691,8 @@ function fitCamera(){
 function resize(){
   if(typeof layoutSeats === 'function') layoutSeats();
   const w = window.innerWidth, h = window.innerHeight;
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));   // 高解像度の端末で描く画素を減らす（2倍→1.5倍）
   renderer.setSize(w, h);
-  if(composer){
-    composer.setPixelRatio(renderer.getPixelRatio()); composer.setSize(w, h);
-    // 画素の大きさ。ぼかしの半径を画面の大きさによらず同じ見た目にするため、基準の高さ800に対する比で持つ
-    const k = renderer.getPixelRatio() * Math.max(.6, Math.min(1.6, h / 800));
-    finPass.uniforms.texel.value.set(k / (w * renderer.getPixelRatio()), k / (h * renderer.getPixelRatio()));
-  }
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
   fitCamera();
@@ -7432,11 +7316,6 @@ function animate(t){
     if(m.material) m.material.opacity = .78 + Math.sin(t / 320 + i) * .18;
   });
   // 海面：頂点は触らず、さざ波のテクスチャをずらすだけで動きを出す
-  if(ripple){
-    const o = ripple.material.map.offset;
-    o.x = (t * .0000105) % 1;
-    o.y = (t * .0000072) % 1;
-  }
   if(cloudShade){
     const o = cloudShade.material.map.offset;
     o.x = (t * .0000042) % 1;
@@ -7454,9 +7333,7 @@ function animate(t){
     b.obj.rotation.z = Math.sin(t / 1150 + b.ph) * .07;
   }
   ambientStep(t, Math.min(dt2, .05));
-  if(composer){
-    composer.render();
-  } else renderer.render(scene, camera);
+  renderer.render(scene, camera);
 }
 
 /* ============================================================
