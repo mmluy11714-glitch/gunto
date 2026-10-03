@@ -4522,6 +4522,11 @@ function makePortTexture(type){
   const any = type === 'any';
   const label = any ? '自由' : RES_JA[type];
   const rate  = any ? '3:1' : '2:1';
+  // 木の枠（板全面を不透明に塗る）
+  x.fillStyle = '#8a6a45'; x.fillRect(0, 0, 192, 192);
+  x.strokeStyle = '#6b5133'; x.lineWidth = 8; x.strokeRect(4, 4, 184, 184);
+  x.strokeStyle = 'rgba(60,40,20,.25)'; x.lineWidth = 2;
+  for(let i = 1; i < 6; i++){ x.beginPath(); x.moveTo(8, i * 32); x.lineTo(184, i * 32); x.stroke(); }
   // 板目を薄く入れた木札
   x.fillStyle = any ? '#e9dcba' : '#eccf96';
   x.beginPath();
@@ -4902,7 +4907,7 @@ function initMaterials(){
   GEO.token    = new THREE.CylinderGeometry(.30, .315, .07, 24);
   // 港
   GEO.deck  = new THREE.BoxGeometry(.62, .08, .42);
-  GEO.sign  = new THREE.BoxGeometry(.58, .04, .58);
+  GEO.sign  = new THREE.BoxGeometry(.58, .04, .58);   // 絵は不透明な木の板ごと描く（透明な余白があると枠に見える）
   GEO.peg   = new THREE.CylinderGeometry(.05, .05, .36, 6);
   // 盗賊
   GEO.rBody = new THREE.ConeGeometry(.17, .46, 8);
@@ -5914,7 +5919,7 @@ function buildPorts(){
     // 木札：真上から読める向きに寝かせる。
     // 箱の面は [+X,-X,+Y,-Y,+Z,-Z] の6つに分かれるので、上面だけに絵を貼る
     const signMat = own(new THREE.MeshStandardMaterial({
-      map: makePortTexture(p.type), transparent: true, roughness: .9
+      map: makePortTexture(p.type), roughness: .9
     }));
     const sign = new THREE.Mesh(GEO.sign, [
       M.dockDark, M.dockDark, signMat, M.dockDark, M.dockDark, M.dockDark
@@ -7125,10 +7130,10 @@ async function handlePick(d){
 
 let prevT = 0;
 /* --- 環境の演出 ---------------------------------------------
-   旗のはためき・煙突の煙・カモメ。見た目だけなので Math.random を使ってよい
+   旗のはためき・煙突の煙。見た目だけなので Math.random を使ってよい
    （進行には関わらない。ネット対戦でも端末ごとに違ってかまわない）。
    動きを減らす設定（prefers-reduced-motion）では止める                 */
-const AMB = {flags: [], chims: [], puffs: [], gulls: [], tick: 0, still: false};
+const AMB = {flags: [], chims: [], puffs: [], tick: 0, still: false};
 try{ AMB.still = matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(e){}
 // 盤から外れた建物（作り直し・都市への発展）を見分ける
 const onBoard = g => !!g.parent;
@@ -7156,88 +7161,6 @@ function initAmbient(){
     sp.renderOrder = 5;
     scene.add(sp);
     AMB.puffs.push({sp, life: 0, dur: 1});
-  }
-  // カモメ：先細りの胴、くちばしと目のある頭、曲がった翼（付け根で上へ反り、先で下がる）と、
-  // 翼端に扇状に開いた初列風切の黒い羽。羽ばたきは翼ごとの付け根の回転だけ
-  const white = new THREE.MeshLambertMaterial({color: 0xf7f7f2, side: THREE.DoubleSide});
-  const mantle = new THREE.MeshLambertMaterial({color: 0xc9cfd3, side: THREE.DoubleSide});
-  const tip = new THREE.MeshLambertMaterial({color: 0x34383d, side: THREE.DoubleSide});
-  const beakM = new THREE.MeshLambertMaterial({color: 0xe8b23a});
-  const eyeM = new THREE.MeshLambertMaterial({color: 0x15120e});
-  // 胴：丸い球を前後に伸ばし、尾へ向けて細くする
-  const body = new THREE.SphereGeometry(1, 16, 10);
-  {
-    const p = body.attributes.position;
-    for(let i = 0; i < p.count; i++){
-      const x = p.getX(i), y = p.getY(i), z = p.getZ(i);
-      const taper = x < 0 ? 1 - .5 * Math.pow(-x, 1.4) : 1 - .12 * x;
-      p.setXYZ(i, x * (x < 0 ? .22 : .16), y * .05 * taper, z * .058 * taper);
-    }
-    body.computeVertexNormals();
-  }
-  const ball = new THREE.SphereGeometry(1, 10, 8);
-  const cone = new THREE.ConeGeometry(1, 1, 8).rotateZ(-Math.PI / 2).translate(.5, 0, 0);   // 先が +x
-  // 翼の面：前縁の点列から、後縁を弦長ぶん後ろへ引いた帯を張る（x が前、z が外側）
-  const wingStrip = (s0, s1, steps, mat) => {
-    const pos = [];
-    const pt = s => {
-      const z = .03 + s * .4;
-      const le = .05 - .09 * s * s;                       // 前縁は外へ行くほど後ろへ流れる
-      const chord = .15 * (1 - .78 * s);
-      const y = .07 * s * (1 - 1.35 * s);                 // 付け根で上へ、先で下がる
-      return [[le, y, z], [le - chord, y - .008 * (1 - s), z]];
-    };
-    for(let k = 0; k < steps; k++){
-      const a = pt(s0 + (s1 - s0) * k / steps), b = pt(s0 + (s1 - s0) * (k + 1) / steps);
-      pos.push(...a[0], ...a[1], ...b[0], ...a[1], ...b[1], ...b[0]);
-    }
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.computeVertexNormals();
-    return g;
-  };
-  const wingInner = wingStrip(0, .66, 6);
-  // 初列風切：翼端から後ろ・外側へ扇状に開く細い羽
-  const feather = (ang, len) => {
-    const s = .66, z = .03 + s * .4, le = .05 - .09 * s * s, y = .07 * s * (1 - 1.35 * s);
-    const dx = -Math.sin(ang) * len, dz = Math.cos(ang) * len;
-    const w = .035;
-    const pos = [le, y, z, le - w * 1.6, y - .006, z, le + dx, y - .01, z + dz,
-                 le, y, z, le + dx, y - .01, z + dz, le + dx + w * .9, y - .008, z + dz - .005];
-    const g = new THREE.BufferGeometry();
-    g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
-    g.computeVertexNormals();
-    return g;
-  };
-  const feathers = [[.12, .2], [.32, .18], [.52, .16], [.72, .13], [.92, .11]].map(q => feather(q[0], q[1]));
-  const tail = new THREE.BufferGeometry();
-  tail.setAttribute('position', new THREE.Float32BufferAttribute([
-    -.13, .004, 0, -.27, 0, .055, -.29, 0, .0, -.13, .004, 0, -.29, 0, .0, -.27, 0, -.055], 3));
-  tail.computeVertexNormals();
-  for(let i = 0; i < 3; i++){
-    const g = new THREE.Group();
-    g.add(new THREE.Mesh(body, white));
-    const head = new THREE.Mesh(ball, white); head.scale.set(.052, .046, .046); head.position.set(.17, .018, 0);
-    const beak = new THREE.Mesh(cone, beakM); beak.scale.set(.065, .017, .017); beak.position.set(.208, .008, 0);
-    beak.rotation.z = -.12;
-    g.add(head, beak, new THREE.Mesh(tail, white));
-    [-1, 1].forEach(sd => {
-      const e = new THREE.Mesh(ball, eyeM); e.scale.setScalar(.01); e.position.set(.19, .03, sd * .036);
-      g.add(e);
-    });
-    const wings = [-1, 1].map(sd => {
-      const pivot = new THREE.Group();
-      pivot.scale.z = sd;                  // 左の翼は右の翼の鏡像
-      pivot.add(new THREE.Mesh(wingInner, mantle));
-      feathers.forEach(f => pivot.add(new THREE.Mesh(f, tip)));
-      g.add(pivot);
-      return {pivot, sd};
-    });
-    g.traverse(o => { o.castShadow = true; });
-    scene.add(g);
-    g.scale.setScalar(.8);
-    AMB.gulls.push({g, wings, r: 5.2 + i * 1.1 + Math.random() * .6, h: 2.7 + i * .35, sp: (.10 + Math.random() * .05) * (i % 2 ? -1 : 1),
-                    a: Math.random() * 6.28, ph: Math.random() * 6.28, cx: 0, cz: 0});
   }
 }
 function ambientStep(t, dt){
@@ -7275,27 +7198,6 @@ function ambientStep(t, dt){
     const sc = .16 + k * .42;
     p.sp.scale.set(sc, sc, sc);
     p.sp.material.opacity = Math.min(1, k * 5) * (1 - k) * .9;
-  }
-  // カモメ：盤の中心のまわりを回りながら、ゆっくり羽ばたく
-  if(AMB.gulls.length && G && G.hexes){
-    if(!AMB.center || AMB.tick % 90 === 1) AMB.center = boardCenter();
-    const c = AMB.center;
-    for(const b of AMB.gulls){
-      b.cx += (c.x - b.cx) * Math.min(1, dt * .5);
-      b.cz += (c.z - b.cz) * Math.min(1, dt * .5);
-      b.a += b.sp * dt;
-      const x = b.cx + Math.cos(b.a) * b.r, z = b.cz + Math.sin(b.a) * b.r * .8;
-      const y = b.h + Math.sin(t / 1700 + b.ph) * .25;
-      b.g.position.set(x, y, z);
-      // 進む向きへ頭を向け、旋回の内側へ少し傾ける
-      const vx = -Math.sin(b.a) * b.r * b.sp, vz = Math.cos(b.a) * b.r * .8 * b.sp;
-      b.g.rotation.order = 'YXZ';
-      b.g.rotation.y = -Math.atan2(vz, vx);
-      b.g.rotation.x = -.28 * Math.sign(b.sp);
-      const flap = Math.sin(t / 150 + b.ph);
-      const glide = (Math.sin(t / 2300 + b.ph) + 1) / 2;       // 羽ばたきと滑空を交互に
-      b.wings.forEach(w => { w.pivot.rotation.x = w.sd * (glide > .55 ? .08 : flap * .55); });
-    }
   }
 }
 
@@ -12679,7 +12581,7 @@ function addOnePortMesh(p, pi){
   deck.position.set(px, .18, pz);
   deck.rotation.y = face;
   boardGroup.add(deck);
-  const signMat = own(new THREE.MeshStandardMaterial({map: makePortTexture(p.type), transparent: true, roughness: .9}));
+  const signMat = own(new THREE.MeshStandardMaterial({map: makePortTexture(p.type), roughness: .9}));
   const sign = new THREE.Mesh(GEO.sign, [M.dockDark, M.dockDark, signMat, M.dockDark, M.dockDark, M.dockDark]);
   sign.position.set(px, .27, pz);
   boardGroup.add(sign);
