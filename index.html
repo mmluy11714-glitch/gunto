@@ -1176,13 +1176,18 @@ function loadCfg(){
   if(CFG.board === 'standard') CFG.board = 'fixed';      // 旧通常版の「標準配置」
   if(CFG.board !== 'random' && CFG.board !== 'fixed') CFG.board = 'random';
   if(!SCENARIOS[CFG.scenario]) CFG.scenario = 'base';
+  /* 名前は起動のたびに初期設定へ戻す。ただし部屋に入るときの再読み込みで消えないよう、
+     同じタブの中だけ sessionStorage に覚えておく（localStorage には残さない）          */
+  let nm = [];
+  try{ nm = JSON.parse(sessionStorage.getItem('island_names') || '[]'); }catch(e){}
   CFG.slots.forEach((sl, i) => {
-    if(!sl.name || !String(sl.name).trim()) sl.name = DEFAULTS.slots[i].name;
+    sl.name = (typeof nm[i] === 'string' && nm[i].trim()) ? nm[i] : DEFAULTS.slots[i].name;
     sl.name = String(sl.name).slice(0, 8);
   });
 }
 function saveCfg(){
-  try{ localStorage.setItem('island_cfg', JSON.stringify(CFG)); }catch(e){}
+  try{ localStorage.setItem('island_cfg', JSON.stringify({...CFG, slots: CFG.slots.map(sl => ({...sl, name: ''}))})); }catch(e){}
+  try{ sessionStorage.setItem('island_names', JSON.stringify(CFG.slots.map(sl => sl.name))); }catch(e){}
 }
 
 // 標準配置：外周から内周へ渦巻き順に地形と数字を並べる
@@ -2168,6 +2173,11 @@ async function determineFirstPlayer(){
 // 操作中の人間プレイヤー（手番がCPUのときは直前の人間を返す）
 let lastHumanId = 0;
 function activeHuman(){
+  /* ネット対戦：提案への返答などは、手番でない人が操作する（passDevice が NET.holder を切り替える）。
+     手番の人を返すと、返答する人の画面で提案した人の手札を見てしまう（資源があるのに無い、無いのに受けられる） */
+  if(NET.on && NET.game && NET.holder !== null && G.players[NET.holder] && !G.players[NET.holder].cpu){
+    lastHumanId = NET.holder; return NET.holder;
+  }
   if(G.players[G.turn] && !G.players[G.turn].cpu){ lastHumanId = G.turn; return G.turn; }
   return lastHumanId;
 }
@@ -2408,31 +2418,41 @@ async function movePirate(hexId, pid){
     if(!e.hexes.includes(hexId)) return;
     if(!victims.includes(e.ship)) victims.push(e.ship);
   });
-  if(victims.length){
-    const target = G.players[victims[Math.floor(rng() * victims.length)]];
-    const pool = RES.filter(r => target.res[r] > 0);
-    if(G.seaSc === 'cloth' && target.cloth > 0 && await clothStealChoice(pid, target)){
-      target.cloth--; G.players[pid].cloth++;
-      log(`${G.players[pid].name}が海賊で${target.name}から布を奪った`);
-      sfx('steal');
-      recalcVP();
-      render();
-    } else if(pool.length){
-      const r = pool[Math.floor(rng() * pool.length)];
-      target.res[r]--; G.players[pid].res[r]++;
-      log(`${G.players[pid].name}が海賊で${target.name}から${RES_JA[r]}を奪った`);
-      render();
-      sfx('steal');
-      await flyBetween([{res:r, n:1, from:target.id, to:pid}]);
-      if(pid === activeHuman()) showGain({[r]:1});
-    } else log(`${target.name}から奪える資源はなかった`);
-  } else log('海賊が移動した');
-  G.mode = null;
-  G.phase = G.robberReturn || 'action';
-  G.robberReturn = null;
-  render();
-  await wait(500);
-  if(G.phase === 'action' && G.players[G.turn].cpu) await cpuAction();
+  if(victims.length > 1 && !G.players[pid].cpu){
+    G.stealFrom = victims; G.stealKind = 'pirate';
+    G.phase = 'steal';
+    G.mode = null;
+    render();
+    showHint('奪う相手を選ぶ');
+    return;
+  }
+  if(victims.length) await pirateSteal(G.players[victims.length > 1 ? pickVictim(victims, pid) : victims[0]], pid);
+  else log('海賊が移動した');
+  await robberEnd();
+}
+// CPU が奪う相手を選ぶ：手札のある相手のうち、公開点の高い人（同点なら手札の多い人）
+function pickVictim(victims, pid){
+  const hand = id => RES.reduce((n, r) => n + G.players[id].res[r], 0);
+  return victims.slice().sort((a, b) =>
+    ((hand(b) > 0) - (hand(a) > 0)) || ((G.players[b].vpPublic || 0) - (G.players[a].vpPublic || 0)) || (hand(b) - hand(a)))[0];
+}
+async function pirateSteal(target, pid){
+  const pool = RES.filter(r => target.res[r] > 0);
+  if(G.seaSc === 'cloth' && target.cloth > 0 && await clothStealChoice(pid, target)){
+    target.cloth--; G.players[pid].cloth++;
+    log(`${G.players[pid].name}が海賊で${target.name}から布を奪った`);
+    sfx('steal');
+    recalcVP();
+    render();
+  } else if(pool.length){
+    const r = pool[Math.floor(rng() * pool.length)];
+    target.res[r]--; G.players[pid].res[r]++;
+    log(`${G.players[pid].name}が海賊で${target.name}から${RES_JA[r]}を奪った`);
+    render();
+    sfx('steal');
+    await flyBetween([{res:r, n:1, from:target.id, to:pid}]);
+    if(pid === activeHuman()) showGain({[r]:1});
+  } else log(`${target.name}から奪える資源はなかった`);
 }
 
 async function moveRobber(hexId, pid){
@@ -2448,20 +2468,35 @@ async function moveRobber(hexId, pid){
     if(v.building && v.building.owner !== pid && !victims.includes(v.building.owner))
       victims.push(v.building.owner);
   });
-  if(victims.length){
-    const target = G.players[victims[Math.floor(rng() * victims.length)]];
-    const pool = RES.filter(r => target.res[r] > 0);
-    if(pool.length){
-      const r = pool[Math.floor(rng() * pool.length)];
-      target.res[r]--; G.players[pid].res[r]++;
-      log(`${G.players[pid].name}が${target.name}から${RES_JA[r]}を奪った`);
-      render();
-      sfx('steal');
-      await flyBetween([{res:r, n:1, from:target.id, to:pid}]);
-      if(pid === activeHuman()) showGain({[r]:1});
-    } else log(`${target.name}から奪える資源はなかった`);
-  } else log('盗賊が移動した');
+  // 相手が2人以上なら、人間は奪う相手を選び、CPU は pickVictim で選ぶ
+  if(victims.length > 1 && !G.players[pid].cpu){
+    G.stealFrom = victims; G.stealKind = 'robber';
+    G.phase = 'steal';
+    G.mode = null;
+    render();
+    showHint('奪う相手を選ぶ');
+    return;
+  }
+  if(victims.length) await robberSteal(G.players[victims.length > 1 ? pickVictim(victims, pid) : victims[0]], pid);
+  else log('盗賊が移動した');
+  await robberEnd();
+}
+// 盗賊で相手の手札から1枚奪う
+async function robberSteal(target, pid){
+  const pool = RES.filter(r => target.res[r] > 0);
+  if(pool.length){
+    const r = pool[Math.floor(rng() * pool.length)];
+    target.res[r]--; G.players[pid].res[r]++;
+    log(`${G.players[pid].name}が${target.name}から${RES_JA[r]}を奪った`);
+    render();
+    sfx('steal');
+    await flyBetween([{res:r, n:1, from:target.id, to:pid}]);
+    if(pid === activeHuman()) showGain({[r]:1});
+  } else log(`${target.name}から奪える資源はなかった`);
+}
+async function robberEnd(){
   G.mode = null;
+  G.stealFrom = null;
   G.phase = G.robberReturn || 'action';
   G.robberReturn = null;
   render();
@@ -3808,7 +3843,7 @@ async function cpuAction(){
         // 相手の提案を裏返して初期値に入れ、こちらから条件を返す
         const done = await openNego({to: p.id, give: wants, get: gives, depth: 1});
         if(done) acted = true;
-      } else log('あなたは断った');
+      } else log(`${NET.on ? human.name : 'あなた'}は断った`);
       render();
       await wait(450);
     }
@@ -4317,6 +4352,7 @@ function initThree(){
   renderer = new THREE.WebGLRenderer({antialias:true});
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.shadowMap.autoUpdate = false;   // 盤は静止しているので、影の描き直しは変化があったときだけ（animate で判断）
   // 白飛びを抑えて写真に近い階調にする。露出を上げると色が淡くなりタイルの見分けが付きにくいので、1未満に絞る
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   renderer.toneMappingExposure = 0.75;
@@ -4356,6 +4392,11 @@ function initThree(){
   boardGroup = new THREE.Group();
   pickGroup = new THREE.Group();
   scene.add(boardGroup, pickGroup);
+  // 盤に物が増減したら影を描き直す
+  ['add', 'remove'].forEach(k => {
+    const f = boardGroup[k].bind(boardGroup);
+    boardGroup[k] = function(){ SHADOW.dirty = true; return f.apply(null, arguments); };
+  });
 
   window.addEventListener('resize', resize);
   resize();
@@ -6631,7 +6672,15 @@ const cam = {theta: Math.PI * .5, phi: 0.92, dist: 14, target: new THREE.Vector3
    島の向きはどの画面でも同じにし、縦画面では伏せ角だけを浅くして
    映りの横長さを抑える（resetCamera）。
    ------------------------------------------------------------ */
+/* 指で動かしすぎて値が壊れる（NaN）と、盤が消えて海だけになる。壊れたら直前の正常な視点へ戻す */
+const CAM_OK = {theta: Math.PI * .5, phi: .92, dist: 14, x: 0, z: 0};
 function applyCamera(){
+  if(![cam.theta, cam.phi, cam.dist, cam.target.x, cam.target.z].every(Number.isFinite)){
+    cam.theta = CAM_OK.theta; cam.phi = CAM_OK.phi; cam.dist = CAM_OK.dist; cam.target.set(CAM_OK.x, 0, CAM_OK.z);
+  } else {
+    cam.dist = Math.min(camMax(), Math.max(6, cam.dist));
+    Object.assign(CAM_OK, {theta: cam.theta, phi: cam.phi, dist: cam.dist, x: cam.target.x, z: cam.target.z});
+  }
   camera.position.set(
     cam.target.x + cam.dist * Math.sin(cam.phi) * Math.cos(cam.theta),
     cam.target.y + cam.dist * Math.cos(cam.phi),
@@ -7129,6 +7178,9 @@ async function handlePick(d){
 }
 
 let prevT = 0;
+/* 影と描画の間引き。影は変化があるか半秒ごとのときだけ描き直し、描画は60fpsを上限にする
+   （120Hzの画面で毎回描くと、見た目は変わらないのに負荷が倍になる）                       */
+const SHADOW = {dirty: true, last: -1e9, frameT: -1e9};
 /* --- 環境の演出 ---------------------------------------------
    旗のはためき・煙突の煙。見た目だけなので Math.random を使ってよい
    （進行には関わらない。ネット対戦でも端末ごとに違ってかまわない）。
@@ -7137,9 +7189,8 @@ const AMB = {flags: [], chims: [], puffs: [], tick: 0, still: false};
 try{ AMB.still = matchMedia('(prefers-reduced-motion: reduce)').matches; }catch(e){}
 // 盤から外れた建物（作り直し・都市への発展）を見分ける
 const onBoard = g => !!g.parent;
-function ambChimney(g, x, y, z){
-  AMB.chims.push({g, x, y, z, next: performance.now() + 400 + Math.random() * 3000});
-}
+// 煙突の湯気は軽量化のため出さない（AMB.chims は空のまま。呼び出しは残してある）
+function ambChimney(g, x, y, z){}
 function makePuffTexture(){
   const c = document.createElement('canvas');
   c.width = c.height = 64;
@@ -7153,15 +7204,6 @@ function makePuffTexture(){
   return new THREE.CanvasTexture(c);
 }
 function initAmbient(){
-  const tex = makePuffTexture();
-  // 煙の粒は使い回す（作っては捨てない）
-  for(let i = 0; i < 40; i++){
-    const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex, transparent: true, opacity: 0, depthWrite: false, color: 0xf2efe8}));
-    sp.visible = false;
-    sp.renderOrder = 5;
-    scene.add(sp);
-    AMB.puffs.push({sp, life: 0, dur: 1});
-  }
 }
 function ambientStep(t, dt){
   if(AMB.still) return;
@@ -7204,6 +7246,8 @@ function ambientStep(t, dt){
 function animate(t){
   requestAnimationFrame(animate);
   t = t || 0;
+  if(t - SHADOW.frameT < 12) return;      // 60fps 上限（ジッタで60Hzが間引かれないよう12ms）（時間は prevT からの差で進むので動きは変わらない）
+  SHADOW.frameT = t;
   const dt2 = Math.max(0, (t - prevT) / 1000); prevT = t;
   // トゥイーンを進める
   for(let i = tweens.length - 1; i >= 0; i--){
@@ -7235,6 +7279,10 @@ function animate(t){
     b.obj.rotation.z = Math.sin(t / 1150 + b.ph) * .07;
   }
   ambientStep(t, Math.min(dt2, .05));
+  if(SHADOW.dirty || tweens.length || t - SHADOW.last > 500){
+    renderer.shadowMap.needsUpdate = true;
+    SHADOW.dirty = false; SHADOW.last = t;
+  }
   renderer.render(scene, camera);
 }
 
@@ -7299,6 +7347,7 @@ function phaseText(){
   if(G.phase === 'roll') return `${p.name}の番 — サイコロを振る`;
   if(G.seaSc){ const t = sea8PhaseText(p); if(t) return t; }
   if(G.phase === 'robber') return `${p.name}が盗賊を動かす`;
+  if(G.phase === 'steal') return `${p.name}が奪う相手を選ぶ`;
   return `${p.name}の番 — 建設・交易`;
 }
 
@@ -7400,6 +7449,17 @@ function renderActions(){
     return;
   }
   if(G.explore){ renderActionsX(btn, me); return; }
+  if(G.phase === 'steal'){
+    (G.stealFrom || []).forEach(v => btn(`${G.players[v].name}から奪う`, `手札${handSize(G.players[v])}枚`, async () => {
+      if(G.busy) return;
+      G.busy = true; render();
+      try{
+        await (G.stealKind === 'pirate' ? pirateSteal : robberSteal)(G.players[v], me.id);
+        await robberEnd();
+      } finally { G.busy = false; if(G.phase !== 'over') render(); }
+    }));
+    return;
+  }
 
   if(isSetup()){
     if(G.setupNeeds === 'settlement'){
@@ -8242,7 +8302,7 @@ async function proposeNego(){
         finish(r);
         return;
       } else {
-        log('あなたは断った');
+        log(`${NET.on ? G.players[activeHuman()].name : 'あなた'}は断った`);
         finish(false);
       }
     } else {
@@ -8340,7 +8400,7 @@ function doTrade(){
   sfx('trade');
   me.res[g] -= rate; G.bank[g] += rate;
   me.res[t]++;      G.bank[t]--;
-  log(`あなたが${RES_JA[g]}${rate}枚を${RES_JA[t]}に交換した`);
+  log(`${NET.on ? me.name : 'あなた'}が${RES_JA[g]}${rate}枚を${RES_JA[t]}に交換した`);
   /* 続けて交換できるよう開いたままにする。閉じるのは「閉じる」だけ。
      払えなくなった資源が選ばれたままにならないよう、選択を直しておく  */
   if(me.res[g] < tradeRate(me, g))
@@ -12731,6 +12791,9 @@ function netAiAsk(){
    3Dの物（メッシュ・材質など）は端末ごとに別物なので除く。three.js の物は toJSON を持っていて、
    置き換え関数には変換後の値が来るため、変換前の値（this[k]）で見分ける */
 function netPlain(k, v){
+  /* 交差点の座標・隣接、辺の端点は盤を作ったときから変わらず、全端末で同じ。指紋から外して軽くする */
+  if(k === 'x' || k === 'z' || k === 'adj' || k === 'edges'){ if(this.adj && this.edges && this.building !== undefined) return undefined; }
+  else if(k === 'v'){ if(this.canRoad !== undefined && this.road !== undefined) return undefined; }
   const o = this[k];
   if(o && typeof o === 'object' &&
      (o.isObject3D || o.isMaterial || o.isTexture || o.isBufferGeometry || o.isVector3 || o.isQuaternion || o.isColor)) return undefined;
@@ -13018,7 +13081,7 @@ function netLoadLib(file, cdn){
 }
 function netSetName(v){
   NET.name = String(v || '').trim().slice(0, 8);
-  try{ localStorage.setItem('island_net_name', NET.name); }catch(e){}
+  try{ sessionStorage.setItem('island_net_name', NET.name); }catch(e){}
   if(NET.host && CFG.slots[0]){
     CFG.slots[0].name = NET.name;
     const inp = document.querySelector('#optSlots .slot-head input');
@@ -13682,7 +13745,7 @@ function netEnter(){
 function netInit(){
   renderSetupModal();   // 読み込みの最初の描画はこの仕組みより前なので、ホスト／参加の行を付けて描き直す
   try{
-    NET.name = localStorage.getItem('island_net_name') || '';
+    NET.name = sessionStorage.getItem('island_net_name') || '';
     NET.token = sessionStorage.getItem('island_net_token') || '';
   }catch(e){}
   $('netBtn').onclick = () => { resumeAudio(); if(NET.on) netOpenModal(); else netOpenEntry(); };
