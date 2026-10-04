@@ -12826,7 +12826,15 @@ function netAiAsk(){
 /* --- 盤の状態の指紋 ---
    3Dの物（メッシュ・材質など）は端末ごとに別物なので除く。three.js の物は toJSON を持っていて、
    置き換え関数には変換後の値が来るため、変換前の値（this[k]）で見分ける */
+/* 置いた道は、あとから変わらない。置いたあとの最初の照合が通れば全員で同じと分かっているので、
+   それ以降の指紋からは外す（端末ごとに同じ手の時点で同じ集合になる）                          */
+const NETX = {g: null, roads: new Set()};
+function netMarkRoads(){
+  if(NETX.g !== G){ NETX.g = G; NETX.roads = new Set(); }
+  G.edges.forEach(e => { if(e.road !== null && e.road !== undefined) NETX.roads.add(e.id); });
+}
 function netPlain(k, v){
+  if(k === 'road' && NETX.g === G && this.canRoad !== undefined && NETX.roads.has(this.id)) return undefined;
   /* 交差点の座標・隣接、辺の端点は盤を作ったときから変わらず、全端末で同じ。指紋から外して軽くする */
   if(k === 'x' || k === 'z' || k === 'adj' || k === 'edges'){ if(this.adj && this.edges && this.building !== undefined) return undefined; }
   else if(k === 'v'){ if(this.canRoad !== undefined && this.road !== undefined) return undefined; }
@@ -12972,6 +12980,7 @@ function netPump(){
       netSend({t:'desync', i: m.i, where: 'before', hash: h, want: m.hash});
       netSendDump(m.i);
     }
+    if(h === m.hash) netMarkRoads();        // 照合が通った時点で置かれている道は、以後の指紋から外す
     NET.mismatchSince = 0;
     NET.queue.shift();
     if(m.from === NET.token) NET.inflight = false;
