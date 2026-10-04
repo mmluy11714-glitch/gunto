@@ -2039,7 +2039,7 @@ function resetLogQueue(){
 }
 function log(msg){
   G.log.push(msg);
-  if(G.log.length > 40) G.log.shift();
+  if(G.log.length > 10) G.log.shift();      // 読み返されないので少なめに（同期の指紋にも入る）
   if(!FX.anim){ LOGQ.wait.length = 0; LOGQ.cur = msg; renderLog(); return; }
   LOGQ.wait.push(msg);
   if(LOGQ.timer) renderLog();        // 表示中でも控えの件数はすぐ出す
@@ -7189,6 +7189,32 @@ let prevT = 0;
 /* 影と描画の間引き。影は変化があるか半秒ごとのときだけ描き直し、描画は60fpsを上限にする
    （120Hzの画面で毎回描くと、見た目は変わらないのに負荷が倍になる）                       */
 const SHADOW = {dirty: true, last: -1e9, frameT: -1e9};
+/* 計測表示：URL に ?perf=1 を付けたときだけ、左下に fps・描画の呼び出し数・三角形数・メモリ上の数を出す。
+   遊ぶほど重くなるときに、何が増えているかを見るため（通常は何も出さない・何もしない）            */
+const PERF = {on: false, el: null, t0: 0, n: 0, ms: 0};
+try{ PERF.on = new URLSearchParams(location.search).get('perf') === '1'; }catch(e){}
+function perfReport(t, cost){
+  if(!PERF.el){
+    PERF.el = document.createElement('pre');
+    PERF.el.style.cssText = 'position:fixed;left:4px;bottom:4px;z-index:99;margin:0;padding:4px 6px;font:11px/1.35 monospace;color:#cfe;background:rgba(0,0,0,.6);pointer-events:none;white-space:pre';
+    document.body.appendChild(PERF.el);
+    PERF.t0 = t;
+  }
+  PERF.n++; PERF.ms += cost;
+  if(t - PERF.t0 < 1000) return;
+  const i = renderer.info, fps = PERF.n * 1000 / (t - PERF.t0);
+  let meshes = 0, shown = 0;
+  scene.traverse(o => { if(o.isMesh){ meshes++; if(o.visible) shown++; } });
+  PERF.el.textContent =
+    `fps ${fps.toFixed(0)}  CPU描画 ${(PERF.ms / PERF.n).toFixed(1)}ms
+` +
+    `呼び出し ${i.render.calls}  三角形 ${(i.render.triangles / 1000).toFixed(0)}k
+` +
+    `メッシュ ${meshes}(表示${shown})  形 ${i.memory.geometries}  絵 ${i.memory.textures}
+` +
+    `手数 ${G && G.turnCount !== undefined ? G.turnCount : '-'}  影 ${renderer.shadowMap.enabled && SUN && SUN.castShadow ? 'あり' : 'なし'}`;
+  PERF.t0 = t; PERF.n = 0; PERF.ms = 0;
+}
 /* --- 環境の演出 ---------------------------------------------
    旗のはためき・煙突の煙。見た目だけなので Math.random を使ってよい
    （進行には関わらない。ネット対戦でも端末ごとに違ってかまわない）。
@@ -7291,7 +7317,9 @@ function animate(t){
     renderer.shadowMap.needsUpdate = true;
     SHADOW.dirty = false; SHADOW.last = t;
   }
+  const c0 = PERF.on ? performance.now() : 0;
   renderer.render(scene, camera);
+  if(PERF.on) perfReport(t, performance.now() - c0);
 }
 
 /* ============================================================
