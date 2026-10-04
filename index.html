@@ -697,6 +697,10 @@
       <div class="seg" id="optSound"></div>
     </div>
     <div class="opt">
+      <label>影（切ると軽くなる）</label>
+      <div class="seg" id="optShadow"></div>
+    </div>
+    <div class="opt">
       <label>上下ドラッグの向き</label>
       <div class="seg" id="optInvert"></div>
     </div>
@@ -806,6 +810,7 @@
     <button class="primary" id="offerYes">受ける</button>
     <button id="offerCounter">条件を返す</button>
     <button id="offerNo">断る</button>
+    <button id="offerNone">持っていない</button>
   </div>
 </div>
 
@@ -895,6 +900,7 @@ const CPU_NAMES = ['ローワン','エレノア','フィン'];
 const P_COLORS  = [0xd8332a, 0x2f6fd0, 0xf4f1e8, 0xef7d1c];
 const P_CSS     = ['#d8332a', '#2f6fd0', '#f4f1e8', '#ef7d1c'];
 
+let SUN = null;     // 影を出す太陽の光（設定の「影」で切り替える）
 const DEFAULTS = {
   count: 4,          // 公式の基本ゲームは3〜4人。既定は4人
   slots: [
@@ -903,7 +909,7 @@ const DEFAULTS = {
     {type:'random', name:'エレノア'},
     {type:'random', name:'フィン'}
   ],
-  vp:10, board:'random', scenario:'base', speed:'normal', sound:1, invertY:1, wheelPan:0,
+  vp:10, board:'random', scenario:'base', speed:'normal', sound:1, invertY:1, wheelPan:0, shadow:(matchMedia('(pointer: coarse)').matches ? 0 : 1),   // 影はスマホでは既定でなし
   autoNo:1,          // 手持ちに無い資源を求められた交渉は自動で断る
   aiKey:'',          // Gemini のAPIキー。段位AIを選んだときだけ使う
   aiModel:''         // 使うモデル。空ならキーで引いた一覧の先頭（無ければ既定）
@@ -994,6 +1000,7 @@ async function aiFetchModels(key){
 const SPEED_MULT = {slow:1.9, normal:1.0, fast:0.35};
 const FX = {mult:1.0, anim:true};
 function applySpeed(){
+  if(SUN && SUN.castShadow !== !!(+CFG.shadow)){ SUN.castShadow = !!(+CFG.shadow); if(typeof SHADOW !== 'undefined') SHADOW.dirty = true; }
   FX.mult = SPEED_MULT[CFG.speed] || 1;
   FX.anim = CFG.speed !== 'fast' && !NET.fast;   // 途中から入った端末は、追いつくまで演出を飛ばす
 }
@@ -3843,7 +3850,7 @@ async function cpuAction(){
         // 相手の提案を裏返して初期値に入れ、こちらから条件を返す
         const done = await openNego({to: p.id, give: wants, get: gives, depth: 1});
         if(done) acted = true;
-      } else log(`${NET.on ? human.name : 'あなた'}は断った`);
+      } else log(ans === 'nohave' ? `${NET.on ? human.name : 'あなた'}は持っていないと答えた` : `${NET.on ? human.name : 'あなた'}は断った`);
       render();
       await wait(450);
     }
@@ -4369,6 +4376,7 @@ function initThree(){
   // 空の映り込み（scene.environment）が回り込みの大半を担うので、半球光は控えめにする
   scene.add(new THREE.HemisphereLight(0xcfe9ff, 0x46593e, 0.24));
   const sun = new THREE.DirectionalLight(0xfff0d0, 1.3);
+  SUN = sun;
   sun.position.set(9, 15, 7);
   sun.castShadow = true;
   // 影の輪郭が階段状に見えないよう、画面の広い端末だけ解像度を上げる
@@ -5181,14 +5189,14 @@ function makeSheepGeo(){
   ];
   // 毛玉：胴の楕円体（半径 a,b,c）の表面の点から、法線方向へ r-突き出し だけ内へ沈める
   const A = .12, B = .075, C = .075, CY = .105;
-  const N = 1100;
+  const N = 450;                                              // 1100個・半径16〜22mm から、軽量化のため少なく大きく（面積はほぼ同じ）
   for(let i = 0; i < N; i++){
     const th = i * 2.399 + rr(-.25, .25);                      // 黄金角で散らして偏りを避ける
     const ph = Math.asin(1 - 2 * (i + .5) / N);                 // 球面を等面積で覆う（腹の下まで）
     const px = A * Math.cos(ph) * Math.cos(th), py = B * Math.sin(ph), pz = C * Math.cos(ph) * Math.sin(th);
     let nx = px / (A * A), ny = py / (B * B), nz = pz / (C * C);
     const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
-    const r = rr(.016, .022), sink = r - rr(.002, .004);        // 突き出しは2〜4mm相当。重なってよい
+    const r = rr(.025, .033), sink = r - rr(.002, .004);        // 突き出しは2〜4mm相当。重なってよい
     parts.push(part(puff, cols[i % 4], [px - nx * sink, CY + py - ny * sink, pz - nz * sink], [rr(0, 3), rr(0, 3), 0], r * 2));
   }
   [[.06, .04], [.06, -.04], [-.07, .04], [-.07, -.04]].forEach(q =>
@@ -5617,7 +5625,7 @@ function tileDecor(h, bins){
     spots(h, 3, {sep:.26, rMin:.5, corner:.4, shrink:.92}).forEach(p => put('hay', p, rnd(.9, 1.1), dir + rnd(-.3, .3)));
   } else if(h.type === 'pasture'){
     // 羊・柵・草の株・花
-    spots(h, 7, {sep:.2}).forEach(p => put('sheep2', p, rnd(.75, 1.05), undefined, tint(.06)));
+    spots(h, 5, {sep:.2}).forEach(p => put('sheep2', p, rnd(.75, 1.05), undefined, tint(.06)));
     spots(h, 6, {sep:.5, rMin:.6, corner:.45, shrink:.78}).filter(p => fits(h, p, .26)).slice(0, 2).forEach(p => put('fence', p, 1));
     spots(h, 20, {sep:.11}).forEach(p => tuft(p, rnd(.85, 1.4), 0x5f9a34));
     spots(h, 9, {sep:.13}).forEach(p => bush(p[0], p[1], rnd(.07, .13), 1.6, .9, 0x3f7a2a));
@@ -6745,7 +6753,7 @@ function fitCamera(){
 function resize(){
   if(typeof layoutSeats === 'function') layoutSeats();
   const w = window.innerWidth, h = window.innerHeight;
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));   // 高解像度の端末で描く画素を減らす（2倍→1.5倍）
+  renderer.setPixelRatio(matchMedia('(pointer: coarse)').matches ? 1 : Math.min(window.devicePixelRatio, 1.5));   // 高解像度の端末で描く画素を減らす（2倍→1.5倍）
   renderer.setSize(w, h);
   camera.aspect = w / h;
   camera.updateProjectionMatrix();
@@ -8128,12 +8136,14 @@ async function askEveryone(me, give, get){
         const c = cpuCounter(t, give, get, me);
         replies.push(c ? {p:t, kind:'counter', c} : {p:t, kind:'no'});
       }
+    } else if(!canPay(t, get) && netPref(t.id, 'autoNo')){
+      replies.push({p:t, kind:'nohave'});      // 出せない人には聞かない（設定「出せない交渉」が自動で断る）
     } else {
       // 人間には端末を回して個別に聞く
       await passDevice(t, `${me.name}からの提案です。端末を${t.name}に渡してください。`);
       const ans = await askHuman(me, give, get, null, false);
       await passDevice(me, `次の人に移ります。端末を${me.name}に戻してください。`);
-      replies.push({p:t, kind: ans === 'yes' ? (canPay(t, get) ? 'yes' : 'nohave') : 'no'});
+      replies.push({p:t, kind: ans === 'yes' ? (canPay(t, get) ? 'yes' : 'nohave') : ans === 'nohave' ? 'nohave' : 'no'});
     }
   }
   return replies;
@@ -8248,8 +8258,24 @@ async function proposeNego(){
 
     // 相手が人間なら、端末を渡して本人に答えてもらう
     if(!target.cpu){
+      // 出せない相手には聞かずに断る（設定「出せない交渉」が自動で断る）
+      if(!canPay(target, get) && netPref(target.id, 'autoNo')){
+        log(`${target.name}は出せる資源がなく断った`);
+        await banner(`${target.name}は持っていない`, 900);
+        finish(false);
+        return;
+      }
       await passDevice(target, `${me.name}からの提案です。端末を${target.name}に渡してください。`);
-      const ans = await askHuman(me, give, get, null, false);
+      const depth0 = NEGO.depth || 0;
+      const ans = await askHuman(me, give, get, null, depth0 < 2);
+      if(ans === 'counter'){
+        // 返す側が、そのまま条件を組み直す（操作する人は返す側のまま）
+        G.busy = prevBusy;
+        const r2 = await openNego({to: me.id, give: get, get: give, depth: depth0 + 1});
+        await passDevice(me, `返答を伝えます。端末を${me.name}に戻してください。`);
+        finish(r2);
+        return;
+      }
       await passDevice(me, `返答を伝えます。端末を${me.name}に戻してください。`);
       if(ans === 'yes' && canPay(target, get)){
         execTrade(me, target, give, get);
@@ -8257,9 +8283,9 @@ async function proposeNego(){
         await banner('交渉が成立した', 900);
         finish(true);
       } else {
-        log(ans === 'yes' ? `${target.name}は求められた資源を持っていなかった`
-                          : `${target.name}は断った`);
-        await banner(ans === 'yes' ? `${target.name}は持っていない` : `${target.name}は断った`, 900);
+        const none = ans === 'yes' || ans === 'nohave';
+        log(none ? `${target.name}は求められた資源を持っていなかった` : `${target.name}は断った`);
+        await banner(none ? `${target.name}は持っていない` : `${target.name}は断った`, 900);
         finish(false);
       }
       return;
@@ -8302,7 +8328,8 @@ async function proposeNego(){
         finish(r);
         return;
       } else {
-        log(`${NET.on ? G.players[activeHuman()].name : 'あなた'}は断った`);
+        const nm0 = NET.on ? G.players[activeHuman()].name : 'あなた';
+        log(ans === 'nohave' ? `${nm0}は持っていないと答えた` : `${nm0}は断った`);
         finish(false);
       }
     } else {
@@ -8335,14 +8362,21 @@ function askHuman(from, gives, wants, note, allowCounter){
     const ybtn = $('offerYes');
     ybtn.disabled = !payable;
     ybtn.textContent = payable ? '受ける' : '受ける（手持ちが足りない）';
+    // 「毎回きく」のときは、受ける・断る・持っていない・条件を返す、の4択にする。
+    // 「持っていない」は、本当に出せないときだけ押せる
+    const nbtn = $('offerNone');
+    const four = !netPref(responder.id, 'autoNo');
+    nbtn.style.display = four ? '' : 'none';
+    nbtn.disabled = payable;
     const close = v => {
       $('offerModal').classList.remove('show');
-      $('offerYes').onclick = null; $('offerNo').onclick = null; cbtn.onclick = null;
+      $('offerYes').onclick = null; $('offerNo').onclick = null; cbtn.onclick = null; nbtn.onclick = null;
       resolve(v);
     };
     $('offerYes').onclick = () => close('yes');
     cbtn.onclick          = () => close('counter');
     $('offerNo').onclick  = () => close('no');
+    nbtn.onclick          = () => close('nohave');
     $('offerModal').classList.add('show');
   });
 }
@@ -8434,6 +8468,8 @@ const OPTS = {
   optSpeed: {key:'speed',    live:true, items:[['slow','ゆっくり'],['normal','ふつう'],['fast','はやい']]},
   optSound: {key:'sound',    live:true, items:[[1,'鳴らす'],[0,'鳴らさない']]},
   optInvert: {key:'invertY', live:true, items:[[1,'逆にする'],[0,'標準']]},
+  // 影を切ると描画が軽くなる（スマホ向け）
+  optShadow: {key:'shadow', live:true, items:[[1,'出す'],[0,'出さない']]},
   // PCのホイール。盤が広いので、拡大縮小ではなく移動に割り当てられるようにした
   optWheel: {key:'wheelPan', live:true, items:[[0,'拡大縮小'],[1,'盤を動かす']]},
   // 持っていない資源を求められたときの扱い。既定は自動で断る（聞かれても応じようがないため）
@@ -12716,7 +12752,7 @@ render();
 const NET_REGIONS = ['actions', 'tradeModal', 'negoModal', 'devModal', 'pickModal',
                      'repliesModal', 'offerModal', 'choiceModal'];
 // 端末ごとの好み。ホストの設定で上書きしない
-const NET_LOCAL = ['speed', 'sound', 'invertY', 'wheelPan', 'autoNo', 'aiKey', 'aiModel'];
+const NET_LOCAL = ['speed', 'sound', 'invertY', 'wheelPan', 'shadow', 'autoNo', 'aiKey', 'aiModel'];
 Object.assign(NET, {
   ws: null, connected: false, token: '', name: '', host: false, members: [], lan: [],
   game: null, queue: [], applied: 0, logLen: 0, inflight: false, outbox: null,
