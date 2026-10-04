@@ -6162,25 +6162,65 @@ function addFlag(g, p, h){
   AMB.flags.push({g, a: flag, b: flag2, ph: Math.random() * 6.28});
 }
 
+/* 建物は材質ごとに1つの形へまとめて描く（開拓地・都市とも3回。以前は部品ごとで8〜12回）。
+   壁（漆喰の絵）と屋根（瓦の絵）は形が全プレイヤー共通なので1度だけ作る。
+   扉・窓・煙突・旗ざおと旗は頂点の色で塗り分け、持ち主ごとに1つ作る。旗はもうはためかせない      */
+const BLD = {};
+const BLD_KIND = {
+  s: {
+    wall: [[GEO_k('sBase'), [0, .125, 0]]],
+    roof: [[GEO_k('sRoof'), [0, .265, 0]], [GEO_k('sEave'), [0, .258, 0]]],
+    flagH: .82
+  },
+  c: {
+    wall: [[GEO_k('cBase'), [-.06, .145, 0]], [GEO_k('cWing'), [.21, .095, .13]], [GEO_k('cTower'), [.16, .25, -.16]]],
+    roof: [[GEO_k('cRoof'), [-.06, .29, 0]], [GEO_k('cEave'), [-.06, .285, 0]],
+           [GEO_k('cWingR'), [.21, .26, .13], [0, Math.PI / 4, 0]], [GEO_k('cSpire'), [.16, .68, -.16], [0, Math.PI / 4, 0]]],
+    flagH: 1.02
+  }
+};
+function GEO_k(name){ return {name}; }
+function bldShell(kind){
+  if(BLD[kind]) return BLD[kind];
+  const d = BLD_KIND[kind];
+  const mk = list => mergeParts(list.map(q => part(GEO[q[0].name], 0xffffff, q[1], q[2] || null, null, true)));
+  return (BLD[kind] = {wall: mk(d.wall), roof: mk(d.roof)});
+}
+// 扉・窓・煙突（または冠）・旗ざお・旗。頂点の色で塗り、持ち主ごとに1つ
+function bldDetail(kind, p){
+  p._bld = p._bld || {};
+  if(p._bld[kind]) return p._bld[kind];
+  const body = new THREE.Color(p.color), flagC = body.clone().multiplyScalar(1.15);
+  const trunk = 0x5b4128, glass = 0xf3ece0, h = BLD_KIND[kind].flagH;
+  const list = kind === 's' ? [
+    part(GEO.door, trunk, [0, .085, .155]),
+    part(GEO.win, glass, [-.115, .175, .155]), part(GEO.win, glass, [.115, .175, .155]),
+    part(GEO.chim, body, [.12, .40, -.07])
+  ] : [
+    part(GEO.cCrown, body, [.16, .53, -.16]),
+    part(GEO.cDoor, trunk, [-.09, .095, .17]),
+    part(GEO.cWin, glass, [-.20, .20, .17]), part(GEO.cWin, glass, [.03, .20, .17]), part(GEO.cWin, glass, [.16, .38, -.055])
+  ];
+  list.push(part(GEO.pole, trunk, [0, 0, 0], null, [1, h, 1]),
+            part(GEO.flag, flagC, [.12, h - .11, 0]),
+            part(GEO.flag, flagC, [.12, h - .11, 0], [0, Math.PI / 2, 0]));
+  return (p._bld[kind] = mergeParts(list));
+}
+function makeBuildingGroup(kind, p){
+  const mt = playerMats(p), sh = bldShell(kind);
+  if(!M.bldVC) M.bldVC = new THREE.MeshStandardMaterial({vertexColors: true, roughness: .8, flatShading: true, side: THREE.DoubleSide});
+  const g = new THREE.Group();
+  g.add(new THREE.Mesh(sh.wall, mt.wall), new THREE.Mesh(sh.roof, mt.roof), new THREE.Mesh(bldDetail(kind, p), M.bldVC));
+  g.traverse(o => { o.castShadow = true; });
+  return g;
+}
+
 // 壁・屋根・軒・窓・扉・煙突をそろえた小屋
 function addSettlementMesh(v, p, type){
-  const mt = playerMats(p);
-  const g = new THREE.Group();
-  const base = new THREE.Mesh(GEO.sBase, mt.wall); base.position.y = .125;
-  // 切妻屋根。四角錐ではなく棟を持つ形にする
-  const roof = new THREE.Mesh(GEO.sRoof, mt.roof); roof.position.y = .265;
-  const eave = new THREE.Mesh(GEO.sEave, mt.roof); eave.position.y = .258;
-  const door = new THREE.Mesh(GEO.door, M.trunk); door.position.set(0, .085, .155);
-  const w1 = new THREE.Mesh(GEO.win, M.sail); w1.position.set(-.115, .175, .155);
-  const w2 = new THREE.Mesh(GEO.win, M.sail); w2.position.set(.115, .175, .155);
-  const chim = new THREE.Mesh(GEO.chim, mt.body); chim.position.set(.12, .40, -.07);
-  g.add(base, roof, eave, door, w1, w2, chim);
-  addFlag(g, p, .82);
-  g.traverse(o => { o.castShadow = true; });
+  const g = makeBuildingGroup('s', p);
   g.position.set(v.x, TOP_Y, v.z);
   boardGroup.add(g);
   v.mesh = g;
-  ambChimney(g, .12, .50, -.07);
   sfx('build');
   buildDust(v.x, TOP_Y, v.z, .9);
   spawnIn(g, TOP_Y);
@@ -6198,31 +6238,10 @@ function spawnIn(obj, baseY){
 // 都市は母屋・塔・別棟へ広げ、開拓地から発展した形が分かるようにする
 function replaceSettlementMesh(v, p){
   if(v.mesh) boardGroup.remove(v.mesh);
-  const mt = playerMats(p);
-  const g = new THREE.Group();
-  const base = new THREE.Mesh(GEO.cBase, mt.wall); base.position.set(-.06, .145, 0);
-  const roof = new THREE.Mesh(GEO.cRoof, mt.roof); roof.position.set(-.06, .29, 0);
-  const eave = new THREE.Mesh(GEO.cEave, mt.roof); eave.position.set(-.06, .285, 0);
-  // 別棟（元の開拓地の名残）
-  const wing = new THREE.Mesh(GEO.cWing, mt.wall); wing.position.set(.21, .095, .13);
-  const wroof = new THREE.Mesh(GEO.cWingR, mt.roof);
-  wroof.position.set(.21, .26, .13); wroof.rotation.y = Math.PI / 4;
-  // 塔
-  const tower = new THREE.Mesh(GEO.cTower, mt.wall); tower.position.set(.16, .25, -.16);
-  const crown = new THREE.Mesh(GEO.cCrown, mt.body); crown.position.set(.16, .53, -.16);
-  const spire = new THREE.Mesh(GEO.cSpire, mt.roof);
-  spire.position.set(.16, .68, -.16); spire.rotation.y = Math.PI / 4;
-  const door = new THREE.Mesh(GEO.cDoor, M.trunk); door.position.set(-.09, .095, .17);
-  const w1 = new THREE.Mesh(GEO.cWin, M.sail); w1.position.set(-.20, .20, .17);
-  const w2 = new THREE.Mesh(GEO.cWin, M.sail); w2.position.set(.03, .20, .17);
-  const w3 = new THREE.Mesh(GEO.cWin, M.sail); w3.position.set(.16, .38, -.055);
-  g.add(base, roof, eave, wing, wroof, tower, crown, spire, door, w1, w2, w3);
-  addFlag(g, p, 1.02);
-  g.traverse(o => { o.castShadow = true; });
+  const g = makeBuildingGroup('c', p);
   g.position.set(v.x, TOP_Y, v.z);
   boardGroup.add(g);
   v.mesh = g;
-  ambChimney(g, -.06, .42, 0);
   sfx('build');
   buildDust(v.x, TOP_Y, v.z, 1.15);
   spawnIn(g, TOP_Y);
