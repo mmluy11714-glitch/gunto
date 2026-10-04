@@ -697,9 +697,21 @@
       <div class="seg" id="optSound"></div>
     </div>
     <div class="opt">
-      <label>影（切ると軽くなる）</label>
-      <div class="seg" id="optShadow"></div>
-    </div>
+        <label>描画の速さ（fps）</label>
+        <div class="seg" id="optFps"></div>
+      </div>
+      <div class="opt">
+        <label>影（切ると軽くなる）</label>
+        <div class="seg" id="optShadow"></div>
+      </div>
+      <div class="opt">
+        <label>遠くの羊・麦を粗くする</label>
+        <div class="seg" id="optLod"></div>
+      </div>
+      <div class="opt">
+        <label>細かい質感（凹凸・雲の影・海面。変えたら再読み込み）</label>
+        <div class="seg" id="optFine"></div>
+      </div>
     <div class="opt">
       <label>上下ドラッグの向き</label>
       <div class="seg" id="optInvert"></div>
@@ -900,6 +912,14 @@ const CPU_NAMES = ['ローワン','エレノア','フィン'];
 const P_COLORS  = [0xd8332a, 0x2f6fd0, 0xf4f1e8, 0xef7d1c];
 const P_CSS     = ['#d8332a', '#2f6fd0', '#f4f1e8', '#ef7d1c'];
 
+const IS_PHONE = matchMedia('(pointer: coarse)').matches;
+/* 細かい質感（凹凸・雲の影・海の細かさ）。盤を作るときに決まるので、設定（CFG）の読み込みを待たず保存値を直接読む。
+   既定はスマホで簡素、PCで細かく。変えたら再読み込みで反映                                                  */
+const FINE = (() => {
+  try{ const o = JSON.parse(localStorage.getItem('island_cfg') || '{}'); if(o.fine !== undefined) return +o.fine ? 1 : 0; }catch(e){}
+  return IS_PHONE ? 0 : 1;
+})();
+const LITE = !FINE;     // 簡素にする（重い効果を外す）
 let SUN = null;     // 影を出す太陽の光（設定の「影」で切り替える）
 const DEFAULTS = {
   count: 4,          // 公式の基本ゲームは3〜4人。既定は4人
@@ -910,6 +930,9 @@ const DEFAULTS = {
     {type:'random', name:'フィン'}
   ],
   vp:10, board:'random', scenario:'base', speed:'normal', sound:1, invertY:1, wheelPan:0, shadow:(matchMedia('(pointer: coarse)').matches ? 0 : 1),   // 影はスマホでは既定でなし
+  fps:(matchMedia('(pointer: coarse)').matches ? 30 : 60),    // 描画の上限。スマホは既定で30
+  lod:1,             // 遠くの羊・麦を粗い形にする
+  fine:(matchMedia('(pointer: coarse)').matches ? 0 : 1),     // 細かい質感（再読み込みで反映）。スマホは既定で簡素
   autoNo:1,          // 手持ちに無い資源を求められた交渉は自動で断る
   aiKey:'',          // Gemini のAPIキー。段位AIを選んだときだけ使う
   aiModel:''         // 使うモデル。空ならキーで引いた一覧の先頭（無ければ既定）
@@ -999,7 +1022,9 @@ async function aiFetchModels(key){
 }
 const SPEED_MULT = {slow:1.9, normal:1.0, fast:0.35};
 const FX = {mult:1.0, anim:true};
+let FPS_GAP = 12;     // 描画の最小間隔(ms)。60fps=12（60Hzで間引かれない余裕）、30fps=28（60Hz・120Hzとも30fpsになる）
 function applySpeed(){
+  FPS_GAP = (+CFG.fps === 30) ? 28 : 12;
   if(SUN && SUN.castShadow !== !!(+CFG.shadow)){ SUN.castShadow = !!(+CFG.shadow); if(typeof SHADOW !== 'undefined') SHADOW.dirty = true; }
   FX.mult = SPEED_MULT[CFG.speed] || 1;
   FX.anim = CFG.speed !== 'fast' && !NET.fast;   // 途中から入った端末は、追いつくまで演出を飛ばす
@@ -4499,7 +4524,7 @@ function makeCloudTexture(){
 function buildSea(){
   /* 海の色は頂点色で持たせる。絵（map）の拡大を使うと、さざ波の法線の
      細かい繰り返しを同時に持てない（1枚の材質は拡大率を1つしか持てない） */
-  const N = 150, wg = new THREE.PlaneGeometry(190, 190, N, N);
+  const N = LITE ? 70 : 150, wg = new THREE.PlaneGeometry(190, 190, N, N);   // スマホは粗く（4万→1万弱の三角形）
   wg.rotateX(-Math.PI / 2);
   const sc = makeSeaTexture().image, sd = sc.getContext('2d').getImageData(0, 0, 512, 512).data;
   const SPAN = 190 / 46, wp = wg.attributes.position, col = [];
@@ -4522,14 +4547,16 @@ function buildSea(){
   // 白い楕円の「さざ波」の層は、近くで見ると短い白線に見えるので置かない（波の動きは海面の法線で出る）
 
   // 雲の影。海面にだけ落ちる柔らかい濃淡をゆっくり流す（島の下に敷くので盤には掛からない）
-  const cg = new THREE.PlaneGeometry(600, 600, 1, 1);
-  cg.rotateX(-Math.PI / 2);
-  cloudShade = new THREE.Mesh(cg, new THREE.MeshBasicMaterial({
-    map: makeCloudTexture(), transparent: true, opacity: .2, depthWrite: false, fog: true, color: 0x05202c
-  }));
-  cloudShade.position.y = -0.31;
-  cloudShade.renderOrder = 2;
-  scene.add(cloudShade);
+  if(!LITE){
+    const cg = new THREE.PlaneGeometry(600, 600, 1, 1);
+    cg.rotateX(-Math.PI / 2);
+    cloudShade = new THREE.Mesh(cg, new THREE.MeshBasicMaterial({
+      map: makeCloudTexture(), transparent: true, opacity: .2, depthWrite: false, fog: true, color: 0x05202c
+    }));
+    cloudShade.position.y = -0.31;
+    cloudShade.renderOrder = 2;
+    scene.add(cloudShade);
+  }
 }
 
 /* --- 文字まわりのテクスチャ -------------------------------- */
@@ -4666,7 +4693,7 @@ function dots(c, n, colors, r){
 }
 function canvasTex(c, rx, ry){
   const t = new THREE.CanvasTexture(c);
-  t.anisotropy = 16;   // 斜めから見た地面のぼやけを減らす
+  t.anisotropy = LITE ? 2 : 16;   // 斜めから見た地面のぼやけを減らす（スマホは弱く）
   if(rx){ t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(rx, ry || 1); }
   return t;
 }
@@ -4872,8 +4899,8 @@ function initMaterials(){
   // 地形の上面。色は絵の側に描き、凹凸も同じ絵から起こす
   const ground = (kind, rough) => {
     const t = canvasTex(groundCanvas(kind));
-    return new THREE.MeshStandardMaterial({color: 0xffffff, map: t, bumpMap: t, bumpScale: .03,
-                                           roughness: rough || .95});
+    return new THREE.MeshStandardMaterial(Object.assign({color: 0xffffff, map: t, roughness: rough || .95},
+                                           LITE ? {} : {bumpMap: t, bumpScale: .03}));
   };
   M.forest    = ground('forest');
   M.hills     = ground('hills');
@@ -4885,10 +4912,10 @@ function initMaterials(){
   M.spice     = ground('spice');         // 香辛料の村
   // 海へ落ちる断崖と、その上の砂の縁
   const cliffTex = canvasTex(cliffCanvas(), 4, 1), sandTex = canvasTex(sandCanvas(), 8, .4);
-  M.cliff     = new THREE.MeshStandardMaterial({color: 0xffffff, map: cliffTex, bumpMap: cliffTex,
-                                                bumpScale: .03, roughness: 1});
-  M.sand      = new THREE.MeshStandardMaterial({color: 0xffffff, map: sandTex, bumpMap: sandTex,
-                                                bumpScale: .01, roughness: 1});
+  M.cliff     = new THREE.MeshStandardMaterial(Object.assign({color: 0xffffff, map: cliffTex, roughness: 1},
+                                                LITE ? {} : {bumpMap: cliffTex, bumpScale: .03}));
+  M.sand      = new THREE.MeshStandardMaterial(Object.assign({color: 0xffffff, map: sandTex, roughness: 1},
+                                                LITE ? {} : {bumpMap: sandTex, bumpScale: .01}));
 
   M.trunk     = std(0x5b4128, 1);
   M.robber    = std(0x2b2b33, .85);
@@ -5049,7 +5076,7 @@ function wheatEar(parts, base, dir, opt){
       const q = p.clone().add(off);
       parts.push(part(grain, col, [q.x, q.y, q.z],
                       [rr(-.25, .25), ang + k * 3.1416, rr(-.25, .25)], [w * 1.15, w * 1.3, w * .9]));
-      if(r >= 2 && r % 2 === 0 && o.awns !== false){        // のぎは上の段の1段おきだけ
+      if(r >= 2 && r % 2 === 0 && o.awns !== false && o.midAwns !== false){        // のぎは上の段の1段おきだけ
         const dirA = dir.clone().multiplyScalar(1).add(off.clone().multiplyScalar(6)).normalize();
         const e = new THREE.Euler(Math.atan2(dirA.z, dirA.y) * .9, 0, -Math.atan2(dirA.x, dirA.y) * .9);
         parts.push(part(awn, awnCol, [q.x, q.y, q.z], [e.x, 0, e.z], [1, rr(.04, .07), 1]));
@@ -5063,23 +5090,24 @@ function wheatEar(parts, base, dir, opt){
                     [rr(-.16, .16), 0, rr(-.16, .16)], [1, rr(.06, .095), 1]));
   }
 }
-function makeWheatGeo(){
+function makeWheatGeo(lo){
   const stalk = new THREE.CylinderGeometry(.005, .009, 1, 4, 1, true).translate(0, .5, 0);
   const blade = new THREE.ConeGeometry(.014, .085, 3, 1, true).translate(0, .043, 0);
   const grain = WHEAT_GRAIN(), awn = WHEAT_AWN();
   const gold = [0xe0ae3e, 0xd6a236, 0xe9bc55, 0xcb9730];
   const parts = [];
-  for(let i = 0; i < 3; i++){
-    const a = i / 3 * 6.283 + rr(-.4, .4), d = rr(.008, .032);
+  const ears = lo ? 2 : 3;
+  for(let i = 0; i < ears; i++){
+    const a = i / ears * 6.283 + rr(-.4, .4), d = rr(.008, .032);
     const x = Math.cos(a) * d, z = Math.sin(a) * d, h = rr(.1, .15);
     const lean = [rr(-.2, .2), 0, rr(-.2, .2)];
     parts.push(part(stalk, 0xc9bd6a, [x, 0, z], lean, [1, h, 1]));
     const dir = new THREE.Vector3(0, 1, 0).applyEuler(new THREE.Euler(lean[0], 0, lean[2]));
     const base = dir.clone().multiplyScalar(h).add(new THREE.Vector3(x, 0, z));
-    wheatEar(parts, base, dir, {grain, awn, rows: 5, earH: rr(.055, .075),
+    wheatEar(parts, base, dir, {grain, awn, rows: lo ? 2 : 3, midAwns: false, awns: !lo, earH: rr(.055, .075),
                                 gw: rr(.028, .036), color: gold[i % gold.length]});
     // 根もとの葉。外へ反らせて株らしく見せる
-    for(let k = 0; k < 2; k++){
+    for(let k = 0; k < (lo ? 1 : 2); k++){
       const la = a + (k ? 2.1 : -2.1);
       parts.push(part(blade, 0x9cae4e, [x, .005, z],
                       [Math.sin(la) * .8, la, -Math.cos(la) * .8], [1, rr(.8, 1.15), 1]));
@@ -5089,13 +5117,13 @@ function makeWheatGeo(){
 }
 /* 刈った麦を束ねた「麦束」。参考図のように、穂を扇に広げて根もとを帯で縛る。
    数が少ないので、粒・のぎ・垂れた葉まで作り込む                          */
-function makeWheatSheafGeo(){
+function makeWheatSheafGeo(lo){
   const stalk = new THREE.CylinderGeometry(.004, .0075, 1, 4, 1, true).translate(0, .5, 0);
   const blade = new THREE.ConeGeometry(.02, .16, 3, 1, true).translate(0, .08, 0);
   const grain = new THREE.SphereGeometry(.5, 5, 4), awn = WHEAT_AWN();
   const gold = [0xe3b444, 0xd8a53a, 0xeec25e, 0xc9932e];
   const parts = [];
-  const N = 7;
+  const N = lo ? 4 : 7;
   for(let i = 0; i < N; i++){
     const a = (i / N) * 6.283 + rr(-.2, .2);
     const tilt = i === 0 ? rr(0, .05) : rr(.12, .3);        // 中心は直立、外は開く
@@ -5105,12 +5133,12 @@ function makeWheatSheafGeo(){
     parts.push(part(stalk, 0xc2bb62, [x, 0, z], lean, [1, h, 1]));
     const dir = new THREE.Vector3(0, 1, 0).applyEuler(new THREE.Euler(lean[0], 0, lean[2]));
     const base = dir.clone().multiplyScalar(h).add(new THREE.Vector3(x, 0, z));
-    wheatEar(parts, base, dir, {grain, awn, rows: 7, earH: rr(.07, .095),
+    wheatEar(parts, base, dir, {grain, awn, rows: lo ? 3 : 7, awns: !lo, earH: rr(.07, .095),
                                 gw: rr(.03, .038), color: gold[i % gold.length]});
   }
   // 垂れた葉を4枚。先を下へ曲げて、図のように裾を広げる
-  for(let k = 0; k < 4; k++){
-    const a = k / 4 * 6.283 + rr(-.3, .3);
+  for(let k = 0; k < (lo ? 2 : 4); k++){
+    const a = k / (lo ? 2 : 4) * 6.283 + rr(-.3, .3);
     parts.push(part(blade, 0xd8c98a, [Math.cos(a) * .02, .04, Math.sin(a) * .02],
                     [Math.sin(a) * 1.15, a, -Math.cos(a) * 1.15], [1, rr(.9, 1.3), 1]));
   }
@@ -5172,7 +5200,7 @@ function makeTuftGeo(){
 // 羊：もこもこの胴・黒い顔と耳・4本の脚。前は +X
 // 胴は小さな毛玉を表面に敷き詰める。毛玉の中心は胴の面から半径ぶん内へ沈めるので、突き出しはごくわずか。
 // 顔には目を入れない（小さい羊に目を付けると不気味になる）
-function makeSheepGeo(){
+function makeSheepGeo(lo){
   const wool = roughen(weld(new THREE.SphereGeometry(.5, 12, 8)), .06);
   const puff = new THREE.SphereGeometry(.5, 5, 3);
   const ball = new THREE.SphereGeometry(.5, 8, 6);
@@ -5189,14 +5217,14 @@ function makeSheepGeo(){
   ];
   // 毛玉：胴の楕円体（半径 a,b,c）の表面の点から、法線方向へ r-突き出し だけ内へ沈める
   const A = .12, B = .075, C = .075, CY = .105;
-  const N = 450;                                              // 1100個・半径16〜22mm から、軽量化のため少なく大きく（面積はほぼ同じ）
+  const N = lo ? 130 : 450;                                              // 1100個・半径16〜22mm から、軽量化のため少なく大きく（面積はほぼ同じ）
   for(let i = 0; i < N; i++){
     const th = i * 2.399 + rr(-.25, .25);                      // 黄金角で散らして偏りを避ける
     const ph = Math.asin(1 - 2 * (i + .5) / N);                 // 球面を等面積で覆う（腹の下まで）
     const px = A * Math.cos(ph) * Math.cos(th), py = B * Math.sin(ph), pz = C * Math.cos(ph) * Math.sin(th);
     let nx = px / (A * A), ny = py / (B * B), nz = pz / (C * C);
     const nl = Math.hypot(nx, ny, nz); nx /= nl; ny /= nl; nz /= nl;
-    const r = rr(.025, .033), sink = r - rr(.002, .004);        // 突き出しは2〜4mm相当。重なってよい
+    const r = rr(.025, .033) * (lo ? 1.86 : 1), sink = r - rr(.002, .004);        // 突き出しは2〜4mm相当。重なってよい
     parts.push(part(puff, cols[i % 4], [px - nx * sink, CY + py - ny * sink, pz - nz * sink], [rr(0, 3), rr(0, 3), 0], r * 2));
   }
   [[.06, .04], [.06, -.04], [-.07, .04], [-.07, -.04]].forEach(q =>
@@ -5425,11 +5453,14 @@ function makeCragGeo(){
 function initProps(){
   GEO.wheatClump = makeWheatGeo();
   GEO.wheatSheaf = makeWheatSheafGeo();
+  GEO.wheatClumpLo = makeWheatGeo(true);
+  GEO.wheatSheafLo = makeWheatSheafGeo(true);
   GEO.hay       = makeHayGeo();
   GEO.brickPile = makeBrickPileGeo();
   GEO.kiln      = makeKilnGeo();
   GEO.tuft      = makeTuftGeo();
   GEO.sheep2    = makeSheepGeo();
+  GEO.sheep2Lo  = makeSheepGeo(true);
   GEO.fence     = makeFenceGeo();
   const t1 = makeLeafyTree(.46, [0x3f7a2c, 0x4c8c34, 0x5a9a3a, 0x2c5a22]);
   const t2 = makeLeafyTree(.38, [0x4f8a2e, 0x5c9a36, 0x6aa63e, 0x365f22]);
@@ -5654,10 +5685,13 @@ function tileDecor(h, bins){
     const occ = makeOcc();
     const rockC = () => new THREE.Color(ROCK_COLS[Math.floor(Math.random() * ROCK_COLS.length)]).multiplyScalar(rnd(1, 1.2));
     const turn = Math.floor(Math.random() * 2), mineAt = Math.floor(Math.random() * 3);
+    const dropRidge = Math.floor(Math.random() * 3);     // 尾根は3か所のうち2か所だけ
+    let outcrops = 0;                                    // 岩塊は1つだけ
     for(let k = 0; k < 6; k++){
       const a = Math.PI / 180 * (60 * k - 30) + rnd(-.06, .06);
       const at = d => [h.x + Math.cos(a) * d, h.z + Math.sin(a) * d];
       if(k % 2 === turn){
+        if((k >> 1) === dropRidge) continue;
         const p = at(rnd(.575, .595));
         occ.take(p, .3);
         // 手前（カメラ側）の尾根は低くして、札を隠さない
@@ -5669,6 +5703,7 @@ function tileDecor(h, bins){
         occ.take(p, .24);
         put('mine', p, rnd(1, 1.1), -a);
       } else {
+        if(outcrops++ >= 1) continue;
         const p = at(.57);
         occ.take(p, .22);
         const so = rnd(1.05, 1.18);
@@ -5678,8 +5713,8 @@ function tileDecor(h, bins){
     }
     /* 枠ぎわと角（街道・建物の場所）の余白は、低く平たい石で埋める。
        高さを街道より低く抑えるので、置いた駒の邪魔にはならない             */
-    spots(h, 140, {sep:.045, rMin:.34, corner:.08, shrink:1}).forEach(p => {
-      const sz = rnd(.05, .11);
+    spots(h, 45, {sep:.07, rMin:.34, corner:.08, shrink:1}).forEach(p => {   // 小石を散らす
+      const sz = rnd(.05, .10);
       if(!fits(h, p, sz * .5, 1) || !occ.free(p, sz * .35)) return;
       pushInst(B(bins, 'scree'), p[0], TOP_Y - .006, p[1], sz, rnd(.025, .045), sz * rnd(.7, 1), ang(), rockC());
     });
@@ -5689,20 +5724,21 @@ function tileDecor(h, bins){
       // 角の方向は、尾根の外側なら置く（尾根は横に長いので円の判定では広すぎる）。岩の塊と坑口の外は空ける
       const cragOut = !face && ((k - 1) / 2 + 1) % 6 % 2 === turn;
       const a = Math.PI / 6 * k + rnd(-.08, .08), d = face ? rnd(.7, .73) : rnd(.76, .79);
-      const p = [h.x + Math.cos(a) * d, h.z + Math.sin(a) * d], sz = rnd(.18, .24);
+      const p = [h.x + Math.cos(a) * d, h.z + Math.sin(a) * d], sz = rnd(.24, .32);
       if(!face && !cragOut) continue;
+      if(k % 6 !== 0) continue;              // 大きな岩は並べず、周りに2つだけ
       if(face && !occ.free(p, sz * .3)) continue;
       occ.take(p, sz * .45);
       pushInst(B(bins, 'boulder'), p[0], TOP_Y - .015, p[1], sz * rnd(1.1, 1.4), sz * rnd(.5, .65), sz * rnd(.8, 1), -a + Math.PI / 2 + rnd(-.3, .3), rockC());
     }
     // 残りの隙間を大きめの岩塊で埋める
-    spots(h, 40, {sep:.1, rMin:.42, corner:.3, shrink:.95}).forEach(p => {
-      const sz = rnd(.1, .17);
+    spots(h, 2, {sep:.3, rMin:.42, corner:.3, shrink:.95}).forEach(p => {
+      const sz = rnd(.17, .26);
       if(!fits(h, p, sz * .55, .95) || !occ.claim(p, sz * .5)) return;
       pushInst(B(bins, 'boulder'), p[0], TOP_Y - .015, p[1], sz * 1.15, sz * rnd(.5, .7), sz * 1.1, ang(), rockC());
     });
-    spots(h, 14, {sep:.08, shrink:.92}).forEach(p => {
-      const sz = rnd(.03, .06);
+    spots(h, 7, {sep:.12, shrink:.92}).forEach(p => {
+      const sz = rnd(.042, .084);
       if(!fits(h, p, sz, .95)) return;
       pushInst(bins.rock, p[0], TOP_Y + sz * .18, p[1], sz * 1.7, sz * .75, sz * 1.5, ang(), varyColor(0x8c7c70, .02, .08, .14));
     });
@@ -5713,8 +5749,8 @@ function tileDecor(h, bins){
       pushInst(bins.bush, p[0], TOP_Y - .01, p[1], rnd(.4, .6), rnd(.07, .11), rnd(.28, .4), ang(), varyColor(0xe6d29e, .02, .06, .06)));
     spots(h, 6, {sep:.22}).forEach(p => put('cactus', p, rnd(.7, 1.2), undefined, tint(.08)));
     spots(h, 18, {sep:.08}).forEach(p => tuft(p, rnd(.5, .8), 0x9c8a55));
-    spots(h, 26, {sep:.07}).forEach(p => {
-      const sz = rnd(.04, .09);
+    spots(h, 13, {sep:.10}).forEach(p => {
+      const sz = rnd(.056, .126);
       pushInst(bins.rock, p[0], TOP_Y + sz * .28, p[1], sz * 1.6, sz, sz * 1.5, ang(), varyColor(0xb8a375, .03, .10, .12));
     });
   } else if(h.type === 'spice'){
@@ -5723,8 +5759,8 @@ function tileDecor(h, bins){
     spots(h, 10, {sep:.16}).forEach(p => bush(p[0], p[1], rnd(.07, .12), 1.2, 1.3, 0xb2452a));
   } else if(h.type === 'gold'){
     // 金の川：岩場と、川床に光る金の粒
-    spots(h, 16, {sep:.14}).forEach(p => {
-      const s = rnd(.07, .15);
+    spots(h, 8, {sep:.20}).forEach(p => {
+      const s = rnd(.098, .21);
       pushInst(bins.rock, p[0], TOP_Y + s * .28, p[1], s * 1.5, s, s * 1.4,
                Math.random() * 6.2832, varyColor(0x7d6a4f, .03, .10, .12));
     });
@@ -5733,8 +5769,8 @@ function tileDecor(h, bins){
       pushInst(bins.face, p[0], TOP_Y + s * .4, p[1], s, s * .6, s, 0, varyColor(0xf2c14e, .02, .08, .08));
     });
   } else if(h.type === 'desert'){
-    spots(h, 26, {sep:.11}).forEach(p => {
-      const s = rnd(.04, .11);
+    spots(h, 13, {sep:.15}).forEach(p => {
+      const s = rnd(.056, .154);
       pushInst(bins.rock, p[0], TOP_Y + s * .28, p[1], s * 1.6, s, s * 1.5,
                Math.random() * 6.2832, varyColor(0xb8a375, .03, .10, .12));
     });
@@ -5748,6 +5784,7 @@ const playerMatList = [];
 function buildScene(){
   while(boardGroup.children.length) boardGroup.remove(boardGroup.children[0]);
   while(pickGroup.children.length) pickGroup.remove(pickGroup.children[0]);
+  LODS = [];
   pickables = [];
   KB.mark = null;
   bobbers.length = 0;
@@ -5842,10 +5879,24 @@ const BIN_FLAT = new Set(['outcropA', 'outcropB', 'outcropC', 'boulder', 'cragA'
 const BIN_LEAF = new Set(['broadleafLeaf', 'broadleaf2Leaf', 'broadleaf3Leaf']);
 const BIN_RECV = new Set(['bush', 'rock', 'pit', 'mine', 'kiln', 'brickPile', 'brickStack', 'stump',
                           'outcropA', 'outcropB', 'outcropC', 'boulder', 'cragA', 'cragB', 'cragC']);
+/* 遠くの物を粗い形にする：羊・麦の株・麦束は三角形が多い。全体を見ている（引いている）間は粗い形を、
+   寄ったときだけ細かい形を出す。切り替えは盤を引いた距離（CAM_FIT＝全体が収まる距離）の約8割   */
+const LOD_PAIR = {sheep2: 'sheep2Lo', wheatClump: 'wheatClumpLo', wheatSheaf: 'wheatSheafLo'};
+let LODS = [], CAM_FIT = 14;
+function updateLod(){
+  const far = !!(+CFG.lod) && cam.dist > CAM_FIT * .78;
+  for(const l of LODS){ l.hi.visible = !far; l.lo.visible = far; }
+}
 function addAllInstanced(bins){
   Object.keys(bins).forEach(k => {
     const im = addInstanced(GEO[BIN_GEO[k] || k], bins[k], BIN_RECV.has(k),
                             BIN_LEAF.has(k) ? M.leaf : BIN_FLAT.has(k) ? M.decorFlat : M.decor);
+    if(im && LOD_PAIR[k]){
+      const lo = addInstanced(GEO[LOD_PAIR[k]], bins[k], BIN_RECV.has(k), M.decor);
+      lo.name = k + 'Lo';
+      LODS.push({hi: im, lo});
+    }
+    if(im) im.name = k;      // 計測で何の部品か分かるように名前を付ける
     if(im && BIN_LEAF.has(k)){ im.customDepthMaterial = M.leafDepth; im.receiveShadow = true; }
   });
 }
@@ -6142,9 +6193,9 @@ function playerMats(p){
   p._mats = {
     body: mk(body, .72),
     wall: mk(body.clone().lerp(new THREE.Color(0xf6f1e4), .34), .82,
-             {map: M.plasterTex, bumpMap: M.plasterTex, bumpScale: .01}),
+             LITE ? {map: M.plasterTex} : {map: M.plasterTex, bumpMap: M.plasterTex, bumpScale: .01}),
     roof: mk(body.clone().multiplyScalar(.58), .86,
-             {map: M.roofTex, bumpMap: M.roofTex, bumpScale: .02}),
+             LITE ? {map: M.roofTex} : {map: M.roofTex, bumpMap: M.roofTex, bumpScale: .02}),
     flag: mk(body, .6, {emissive: body.clone().multiplyScalar(.22), side: THREE.DoubleSide})
   };
   return p._mats;
@@ -6767,6 +6818,7 @@ function fitCamera(){
     if(inside(mid)) hi = mid; else lo = mid;
   }
   cam.dist = hi;
+  CAM_FIT = hi;
   applyCamera();
 }
 function resize(){
@@ -7208,6 +7260,9 @@ let prevT = 0;
 /* 影と描画の間引き。影は変化があるか半秒ごとのときだけ描き直し、描画は60fpsを上限にする
    （120Hzの画面で毎回描くと、見た目は変わらないのに負荷が倍になる）                       */
 const SHADOW = {dirty: true, last: -1e9, frameT: -1e9};
+const ACT = {t: 0};                                   // 最後に操作や盤面の更新があった時刻
+const wake = () => { ACT.t = performance.now(); };
+['pointerdown', 'pointermove', 'touchstart', 'touchmove', 'wheel', 'keydown', 'resize', 'click'].forEach(ev => window.addEventListener(ev, wake, {passive: true}));
 /* 計測表示：URL に ?perf=1 を付けたときだけ、左下に fps・描画の呼び出し数・三角形数・メモリ上の数を出す。
    遊ぶほど重くなるときに、何が増えているかを見るため（通常は何も出さない・何もしない）            */
 const PERF = {on: false, el: null, t0: 0, n: 0, ms: 0};
@@ -7231,7 +7286,10 @@ function perfReport(t, cost){
 ` +
     `メッシュ ${meshes}(表示${shown})  形 ${i.memory.geometries}  絵 ${i.memory.textures}
 ` +
-    `手数 ${G && G.turnCount !== undefined ? G.turnCount : '-'}  影 ${renderer.shadowMap.enabled && SUN && SUN.castShadow ? 'あり' : 'なし'}`;
+    `手数 ${G && G.turnCount !== undefined ? G.turnCount : '-'}  影 ${renderer.shadowMap.enabled && SUN && SUN.castShadow ? 'あり' : 'なし'}` +
+    // 止まったときの手がかり：busy＝進行中の印、待ち＝演出の待ち数、操作権＝いま操作できる席、受信＝届いた操作の数
+    (NET.on ? `
+通信 busy=${G && G.busy ? 1 : 0} 待ち=${NETW.pend} 操作権=${NET.holder} 自席=${NET.pid} 受信=${NET.applied}/${NET.logLen} 待機=${NET.queue.length} 段階=${G && G.phase}` : '');
   PERF.t0 = t; PERF.n = 0; PERF.ms = 0;
 }
 /* --- 環境の演出 ---------------------------------------------
@@ -7299,7 +7357,9 @@ function ambientStep(t, dt){
 function animate(t){
   requestAnimationFrame(animate);
   t = t || 0;
-  if(t - SHADOW.frameT < 12) return;      // 60fps 上限（ジッタで60Hzが間引かれないよう12ms）（時間は prevT からの差で進むので動きは変わらない）
+  // 何も動いていないとき（触っていない・演出なし）は1秒に8回ほどにする。熱と電池を節約。操作や盤面の更新ですぐ戻る
+  const idle = !tweens.length && !drag && t - ACT.t > 1500;
+  if(t - SHADOW.frameT < (idle ? 120 : FPS_GAP)) return;      // 60fps 上限（ジッタで60Hzが間引かれないよう12ms）（時間は prevT からの差で進むので動きは変わらない）
   SHADOW.frameT = t;
   const dt2 = Math.max(0, (t - prevT) / 1000); prevT = t;
   // トゥイーンを進める
@@ -7332,6 +7392,7 @@ function animate(t){
     b.obj.rotation.z = Math.sin(t / 1150 + b.ph) * .07;
   }
   ambientStep(t, Math.min(dt2, .05));
+  if(LODS.length){ LODS = LODS.filter(l => l.hi.parent); updateLod(); }
   if(SHADOW.dirty || tweens.length || t - SHADOW.last > 500){
     renderer.shadowMap.needsUpdate = true;
     SHADOW.dirty = false; SHADOW.last = t;
@@ -7411,6 +7472,7 @@ function costLabel(kind){
 }
 
 function render(){
+  wake();
   $('phase').textContent = phaseText();
   $('d1').textContent = G.dice[0] ?? '-';
   $('d2').textContent = G.dice[1] ?? '-';
@@ -8273,7 +8335,6 @@ async function proposeNego(){
   // 全員に問う場合
   if(!target){
     $('negoModal').classList.remove('show');
-    const prevBusy2 = G.busy;
     G.busy = true; render();
     try{
       log(`${me.name}が全員に持ちかけた：${bundleText(give)} ↔ ${bundleText(get)}`);
@@ -8290,7 +8351,9 @@ async function proposeNego(){
         finishNego(false);
       }
     } finally {
-      G.busy = prevBusy2;
+      /* 全員への持ちかけは手番の最上位からしか始まらない（条件の返し合いは相手を指す）ので、終わったら必ず進行中を解く。
+         開始時の値へ戻すと、開始時にもう進行中だった（ボタンが二重に効いた等）とき、終わっても進行中のまま動かなくなる */
+      G.busy = false;
       if(G.phase !== 'over') render();
     }
     return;
@@ -8517,6 +8580,12 @@ const OPTS = {
   optInvert: {key:'invertY', live:true, items:[[1,'逆にする'],[0,'標準']]},
   // 影を切ると描画が軽くなる（スマホ向け）
   optShadow: {key:'shadow', live:true, items:[[1,'出す'],[0,'出さない']]},
+  // 描画の上限。30にすると軽い（動きは少し粗くなる）
+  optFps: {key:'fps', live:true, items:[[30,'30（軽い）'],[60,'60']]},
+  // 遠くの羊・麦を粗い形にする（引いて見ている間だけ。寄ると細かい形に戻る）
+  optLod: {key:'lod', live:true, items:[[1,'粗くする（軽い）'],[0,'しない']]},
+  // 凹凸・雲の影・海面の細かさ。盤を作るときに決まるので、再読み込みで反映
+  optFine: {key:'fine', live:true, items:[[1,'細かく'],[0,'簡素に（軽い）']], onChange: () => showHint('再読み込みすると反映される')},
   // PCのホイール。盤が広いので、拡大縮小ではなく移動に割り当てられるようにした
   optWheel: {key:'wheelPan', live:true, items:[[0,'拡大縮小'],[1,'盤を動かす']]},
   // 持っていない資源を求められたときの扱い。既定は自動で断る（聞かれても応じようがないため）
@@ -12799,7 +12868,7 @@ render();
 const NET_REGIONS = ['actions', 'tradeModal', 'negoModal', 'devModal', 'pickModal',
                      'repliesModal', 'offerModal', 'choiceModal'];
 // 端末ごとの好み。ホストの設定で上書きしない
-const NET_LOCAL = ['speed', 'sound', 'invertY', 'wheelPan', 'shadow', 'autoNo', 'aiKey', 'aiModel'];
+const NET_LOCAL = ['speed', 'sound', 'invertY', 'wheelPan', 'shadow', 'fps', 'lod', 'fine', 'autoNo', 'aiKey', 'aiModel'];
 Object.assign(NET, {
   ws: null, connected: false, token: '', name: '', host: false, members: [], lan: [],
   game: null, queue: [], applied: 0, logLen: 0, inflight: false, outbox: null,
