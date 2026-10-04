@@ -8579,13 +8579,13 @@ const OPTS = {
   optSound: {key:'sound',    live:true, items:[[1,'鳴らす'],[0,'鳴らさない']]},
   optInvert: {key:'invertY', live:true, items:[[1,'逆にする'],[0,'標準']]},
   // 影を切ると描画が軽くなる（スマホ向け）
-  optShadow: {key:'shadow', live:true, items:[[1,'出す'],[0,'出さない']]},
+  optShadow: {key:'shadow', live:true, items:[[0,'出さない（軽い）'],[1,'出す']]},
   // 描画の上限。30にすると軽い（動きは少し粗くなる）
   optFps: {key:'fps', live:true, items:[[30,'30（軽い）'],[60,'60']]},
   // 遠くの羊・麦を粗い形にする（引いて見ている間だけ。寄ると細かい形に戻る）
   optLod: {key:'lod', live:true, items:[[1,'粗くする（軽い）'],[0,'しない']]},
   // 凹凸・雲の影・海面の細かさ。盤を作るときに決まるので、再読み込みで反映
-  optFine: {key:'fine', live:true, items:[[1,'細かく'],[0,'簡素に（軽い）']], onChange: () => showHint('再読み込みすると反映される')},
+  optFine: {key:'fine', live:true, items:[[0,'簡素に（軽い）'],[1,'細かく']], onChange: () => showHint('再読み込みすると反映される')},
   // PCのホイール。盤が広いので、拡大縮小ではなく移動に割り当てられるようにした
   optWheel: {key:'wheelPan', live:true, items:[[0,'拡大縮小'],[1,'盤を動かす']]},
   // 持っていない資源を求められたときの扱い。既定は自動で断る（聞かれても応じようがないため）
