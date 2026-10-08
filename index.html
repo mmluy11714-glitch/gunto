@@ -20,6 +20,13 @@
     --coral:#e0674f;
     --gold:#d9a441;
     --line:rgba(217,201,163,.22);
+    --cream:#f3ead2;
+    --brass:#c9a85c;
+    /* 海ガラスのような暗い面。ぼかし（backdrop-filter）は毎フレーム再計算されて重いので使わず、
+       上が少し明るい階調と細い光の縁で厚みを出す */
+    --panel-bg:linear-gradient(180deg,rgba(18,54,72,.95),rgba(8,29,41,.96));
+    --panel-edge:inset 0 1px 0 rgba(255,244,214,.10), 0 .12rem .55rem rgba(2,14,22,.38);
+    --serif:"Hiragino Mincho ProN","Yu Mincho","YuMincho","Noto Serif JP","Hiragino Mincho Pro",Georgia,serif;
     /* トップバーの下端。ログ行と上段の席カードはここから積む */
     --barTop:calc(clamp(.35rem,1.1vw,.7rem) + clamp(1.5rem,4.2vw,2.15rem)
                   + clamp(.45rem,.62vw,.72rem) * 2 + .34rem);
@@ -35,6 +42,10 @@
     overscroll-behavior:none;
   }
   #canvas-wrap{position:fixed;inset:0;}
+  #canvas-wrap::after{
+    content:"";position:absolute;inset:0;pointer-events:none;
+    background:radial-gradient(ellipse 75% 70% at 50% 52%, transparent 58%, rgba(3,18,30,.34) 100%);
+  }
   canvas{display:block;touch-action:none;}
 
   #shell{
@@ -42,11 +53,10 @@
     padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
   }
   .panel{
-    background:var(--panel);
-    backdrop-filter:blur(8px);
-    -webkit-backdrop-filter:blur(8px);
+    background:var(--panel-bg);
     border:1px solid var(--line);
     border-radius:.55rem;
+    box-shadow:var(--panel-edge);
     pointer-events:auto;
   }
   #topbar{
@@ -56,13 +66,13 @@
     /* 右上の歯車に重ならないよう、その分だけ幅を譲る */
     max-width:calc(100% - 7rem);
   }
-  #title{font-weight:600;letter-spacing:.06em;color:var(--sand);white-space:nowrap;}
+  #title{font-family:var(--serif);font-weight:700;letter-spacing:.14em;color:var(--sand);white-space:nowrap;}
   #phase{color:var(--ink-dim);min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
   @media (max-width:520px){ #title{display:none;} }
   hr{border:none;border-top:1px solid var(--line);margin:.3rem 0;}
   button{
-    font:inherit;color:var(--ink);background:rgba(217,201,163,.10);
-    border:1px solid var(--line);border-radius:.35rem;
+    font:inherit;color:var(--ink);background:linear-gradient(180deg,rgba(217,201,163,.15),rgba(217,201,163,.07));
+    border:1px solid var(--line);border-radius:.35rem;box-shadow:inset 0 1px 0 rgba(255,244,214,.08);
     padding:.45rem .55rem;cursor:pointer;text-align:left;
     display:flex;justify-content:space-between;gap:.4rem;align-items:baseline;
     font-size:clamp(.72rem,1.5vw,.98rem);
@@ -70,8 +80,9 @@
   button:hover:not(:disabled){background:rgba(217,201,163,.2);}
   button:focus-visible{outline:2px solid var(--sand);outline-offset:1px;}
   button:disabled{opacity:.35;cursor:default;}
-  button.primary{background:var(--sand);color:#152227;border-color:var(--sand);font-weight:600;justify-content:center;}
-  button.primary:hover:not(:disabled){background:#e8dcbd;}
+  button.primary{background:linear-gradient(180deg,#eadfc0,#d3c196);color:#152227;border-color:#e6d9b6;font-weight:600;justify-content:center;
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.55), inset 0 -2px 0 rgba(90,70,30,.22), 0 .1rem .3rem rgba(2,14,22,.3);}
+  button.primary:hover:not(:disabled){background:linear-gradient(180deg,#f2e9cf,#dccb9f);}
   button.active{background:var(--coral);border-color:var(--coral);color:#fff;}
   .cost{color:var(--ink-dim);font-size:.85em;white-space:nowrap;}
   button.active .cost{color:rgba(255,255,255,.8);}
@@ -88,8 +99,7 @@
     padding:0;gap:0;text-align:center;
     width:clamp(2rem,5.4vw,2.6rem);height:clamp(2rem,5.4vw,2.6rem);
     font-size:clamp(1.1rem,2.9vw,1.45rem);line-height:0;
-    background:var(--panel);border:1px solid var(--line);border-radius:.5rem;
-    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    background:var(--panel-bg);border:1px solid var(--line);border-radius:.5rem;box-shadow:var(--panel-edge);
   }
   /* 図形なので、絵文字と違って字形の偏りがなく枠のちょうど中央に出る */
   /* 割合ではなく em で指定する。grid の中身は内容に合わせて縮むので % だと潰れる */
@@ -97,9 +107,10 @@
   .die{
     flex:none;
     width:clamp(1.5rem,4.2vw,2.15rem);height:clamp(1.5rem,4.2vw,2.15rem);
-    border-radius:.3rem;background:var(--sand);color:#1a2a30;
+    border-radius:.3rem;background:linear-gradient(145deg,#f6eed6,#d2c093);color:#1a2a30;
+    box-shadow:inset 0 -2px 0 rgba(90,70,30,.25), 0 1px 2px rgba(2,14,22,.4);
     display:grid;place-items:center;
-    font-weight:700;font-size:clamp(.8rem,2.2vw,1.25rem);
+    font-family:var(--serif);font-weight:700;font-size:clamp(.8rem,2.2vw,1.25rem);
   }
 
   #logline{
@@ -126,8 +137,7 @@
   /* 四隅のプレイヤー席。島は丸いので画面の隅は空いている */
   .seat{
     position:absolute;pointer-events:auto;
-    background:var(--panel);
-    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    background:var(--panel-bg);box-shadow:var(--panel-edge);
     border:1px solid var(--line);border-radius:.5rem;
     padding:clamp(.35rem,.75vw,.6rem) clamp(.5rem,1.05vw,.85rem);
     min-width:clamp(7.2rem,16vw,13rem);
@@ -135,7 +145,7 @@
     display:none;
   }
   .seat.on{display:block;}
-  .seat.turn{border-color:var(--sand);box-shadow:0 0 0 1px var(--sand);}
+  .seat.turn{border-color:var(--sand);box-shadow:0 0 0 1px var(--sand), 0 0 .9rem rgba(217,201,163,.3), var(--panel-edge);}
   /* 資源の受け渡し中だけ、出し手と受け手の枠を縁取る */
   .give,.take{transition:outline-color .18s;}
   .give{outline:2px solid var(--coral);outline-offset:2px;}
@@ -147,7 +157,7 @@
   #seat-br{right:clamp(.35rem,1.1vw,.7rem);bottom:var(--seatBottom,4.5rem);}
   .seat .row1{display:flex;align-items:center;gap:.35rem;}
   .seat .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;}
-  .seat .vp{font-variant-numeric:tabular-nums;color:var(--sand);flex:none;}
+  .seat .vp{font-family:var(--serif);font-weight:700;font-variant-numeric:tabular-nums;color:var(--cream);flex:none;}
   .seat .row2{
     display:flex;gap:.3rem;flex-wrap:wrap;margin-top:.15rem;
     font-size:.88em;color:var(--ink-dim);
@@ -171,11 +181,12 @@
   .res{
     position:relative;display:flex;flex-direction:column;align-items:center;gap:.1rem;
     min-width:clamp(2.4rem,6.5vw,4.2rem);padding:clamp(.25rem,.45vw,.44rem) .25rem;
-    border-radius:.35rem;background:rgba(0,0,0,.22);
+    border-radius:.35rem;background:linear-gradient(180deg,rgba(0,0,0,.28),rgba(0,0,0,.16));
+    box-shadow:inset 0 1px 0 rgba(255,244,214,.06);
   }
   .res .ico{font-size:clamp(.9rem,2.3vw,1.6rem);line-height:1;}
   .res .nm{font-size:clamp(.54rem,1.2vw,.8rem);color:var(--ink-dim);}
-  .res .ct{font-size:clamp(.82rem,2vw,1.3rem);font-variant-numeric:tabular-nums;font-weight:600;}
+  .res .ct{font-family:var(--serif);color:var(--cream);font-size:clamp(.82rem,2vw,1.3rem);font-variant-numeric:tabular-nums;font-weight:700;}
   .masked{padding:.5rem;color:var(--ink-dim);font-size:clamp(.72rem,1.6vw,.85rem);text-align:center;}
   #actions{
     display:grid;gap:clamp(.3rem,.5vw,.5rem);
@@ -538,8 +549,7 @@
     padding:0;gap:0;text-align:center;
     width:clamp(2rem,5.4vw,2.6rem);height:clamp(2rem,5.4vw,2.6rem);
     font-size:clamp(1.1rem,2.9vw,1.45rem);line-height:0;
-    background:var(--panel);border:1px solid var(--line);border-radius:.5rem;
-    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+    background:var(--panel-bg);border:1px solid var(--line);border-radius:.5rem;box-shadow:var(--panel-edge);
   }
   body:not(.net-on) #netDot{display:none;}
   #netBtn svg{display:block;width:1em;height:1em;fill:currentColor;color:var(--sand);}
@@ -6635,7 +6645,11 @@ function rollDice3D(a, b){
   }).then(() => wait(200)).then(() => tween(270, k => {
     diceGroup.children.forEach(m => { m.position.y = LAND + k * .9 * sc; });
     mats.forEach(m => { m.opacity = Math.max(0, 1 - k); });
-  })).then(() => { diceGroup.visible = false; });
+  })).then(() => {
+    diceGroup.visible = false;
+    // 影は変化があったときだけ描き直す設定なので、さいころが消えたことを伝えないと影が最大0.5秒残る
+    SHADOW.dirty = true; ACT.t = performance.now();
+  });
 }
 
 /* --- 決着の演出 --------------------------------------------- */
